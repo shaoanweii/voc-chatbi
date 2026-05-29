@@ -655,7 +655,8 @@ function streamChartResponse({
         }
 
         const chartData = buildChartDataFromRows(queryRows, chartSpec, userQuery);
-        const { analysis: analysisContent, usage: chartAnalysisUsage } = await generateChartAnalysis(userQuery, safeSql, queryRows, chartSpec, reasoningEnabled);
+        const { analysis: rawAnalysis, usage: chartAnalysisUsage } = await generateChartAnalysis(userQuery, safeSql, queryRows, chartSpec, reasoningEnabled);
+        const analysisContent = rawAnalysis || buildFallbackChartAnalysis(chartData, queryRows.length);
         const { followUps, usage: followUpsUsage } = await generateFollowUps({
           userQuery,
           answer: analysisContent,
@@ -811,7 +812,7 @@ function buildChartDataFromRows(
       }) || keys[1])
     : keys[0];
 
-  const data = rows.slice(0, 30).map((row, index) => {
+  const rawData = rows.slice(0, 30).map((row, index) => {
     const rawName = row[dimKey];
     const name = formatChartLabel(String(rawName ?? `项${index + 1}`), chartSpec?.dimension || '');
     const rawValue = row[valKey];
@@ -819,9 +820,25 @@ function buildChartDataFromRows(
     return { name, value, color: COLORS[index % COLORS.length] };
   });
 
+  const isProportionChart = chartType === 'pie' || chartType === 'donut';
+  const data = isProportionChart ? topNWithOther(rawData, 10) : rawData;
+
   const subtitle = measure || `${dimKey} × ${valKey}`;
 
   return { title, subtitle, type: chartType, data };
+}
+
+type ChartDataPoint = { name: string; value: number; color: string };
+
+function topNWithOther(data: ChartDataPoint[], n: number): ChartDataPoint[] {
+  if (data.length <= n) return data;
+  const sorted = [...data].sort((a, b) => b.value - a.value);
+  const top = sorted.slice(0, n);
+  const otherSum = sorted.slice(n).reduce((sum, item) => sum + item.value, 0);
+  if (otherSum > 0) {
+    top.push({ name: '其他', value: otherSum, color: '#cbd5e1' });
+  }
+  return top;
 }
 
 async function generateChartAnalysis(
@@ -858,6 +875,29 @@ ${JSON.stringify(sampleRows, null, 2)}
   );
 
   return { analysis: answer.trim(), usage };
+}
+
+function buildFallbackChartAnalysis(
+  chartData: { title: string; type: string; data: Array<{ name: string; value: number }> },
+  totalRows: number,
+): string {
+  if (!chartData.data || chartData.data.length === 0) {
+    return `共查询到 ${totalRows} 条记录，当前数据无法生成有效的图表分析。请检查筛选条件后重试。`;
+  }
+  const values = chartData.data.map((d) => d.value).filter((v) => typeof v === 'number' && !isNaN(v));
+  if (values.length === 0) {
+    return `图表展示了 ${chartData.data.length} 个维度的数据分布情况，建议查看具体数值进行业务判断。`;
+  }
+  const maxItem = chartData.data.reduce((a, b) => (a.value > b.value ? a : b));
+  const minItem = chartData.data.reduce((a, b) => (a.value < b.value ? a : b));
+  const avg = Math.round(values.reduce((s, v) => s + v, 0) / values.length);
+  const chartTypeLabel = chartData.type === 'pie' || chartData.type === 'donut' ? '占比' : '分布';
+
+  return `共查询到 ${totalRows} 条记录，${chartData.title}的${chartTypeLabel}情况如下：
+- 最高值：${maxItem.name}（${maxItem.value}），最低值：${minItem.name}（${minItem.value}）
+- 平均值：${avg}
+- 共涉及 ${chartData.data.length} 个${chartData.type === 'pie' || chartData.type === 'donut' ? '分类' : '维度'}
+以上结论由系统基于查询结果自动生成，仅供参考。`;
 }
 
 function streamSmartReportResponse({
