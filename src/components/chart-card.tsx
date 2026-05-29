@@ -261,11 +261,10 @@ export function ChartCard({ data }: ChartCardProps) {
             <PieChart margin={{ top: 10, right: 100, bottom: 10, left: 100 }}>
               <Tooltip
                 contentStyle={tooltipStyle}
-                formatter={(value: number, _name: string, props: any) => {
-                  const itemName = props?.payload?.name || '';
+                formatter={(value: number, name: string) => {
                   const total = data.data.reduce((sum, d) => sum + d.value, 0);
                   const pct = total > 0 ? ((value / total) * 100).toFixed(1) : '0';
-                  return [`${value.toLocaleString()}（${pct}%）`, itemName || '数量'];
+                  return [`${value.toLocaleString()}（${pct}%）`, name || '数量'];
                 }}
               />
               <Pie
@@ -311,10 +310,10 @@ export function ChartCard({ data }: ChartCardProps) {
             <PieChart margin={{ top: 10, right: 100, bottom: 10, left: 100 }}>
               <Tooltip
                 contentStyle={tooltipStyle}
-                formatter={(value: number, _name: string) => {
+                formatter={(value: number, name: string) => {
                   const total = data.data.reduce((sum, d) => sum + d.value, 0);
                   const pct = total > 0 ? ((value / total) * 100).toFixed(1) : '0';
-                  return [`${value.toLocaleString()}（${pct}%）`, '数量'];
+                  return [`${value.toLocaleString()}（${pct}%）`, name || '数量'];
                 }}
               />
               <Pie
