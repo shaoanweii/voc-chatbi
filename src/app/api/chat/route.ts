@@ -851,40 +851,44 @@ function computeChartStats(chartData: { title: string; type: string; data: Chart
   const count = data.length;
   const sorted = [...data].sort((a, b) => (b.value || 0) - (a.value || 0));
   const maxVal = sorted[0]?.value || 0;
-  const minVal = sorted[sorted.length - 1]?.value || 0;
-  const avgVal = total / count;
-  const variance = sorted.reduce((s, d) => s + Math.pow((d.value || 0) - avgVal, 2), 0) / count;
-  const cv = avgVal > 0 ? (Math.sqrt(variance) / avgVal * 100).toFixed(0) : '0';
 
   const parts = [
-    `共 **${count}** 条数据，总量 **${total.toLocaleString()}**，均值 **${avgVal.toFixed(1)}**，极差 **${(maxVal - minVal).toLocaleString()}**（最大值 **${maxVal.toLocaleString()}**，最小值 **${minVal.toLocaleString()}**），离散系数 **${cv}%**`,
+    `共 **${count}** 个维度，总量 **${total.toLocaleString()}**，最高 **${maxVal.toLocaleString()}**（Top1 占 **${total > 0 ? ((maxVal / total) * 100).toFixed(1) : '0'}%**）`,
   ];
 
   const topN = sorted.slice(0, 5);
   topN.forEach((d, i) => {
     const pct = total > 0 ? ((d.value / total) * 100).toFixed(1) : '0';
-    parts.push(`Top${i + 1}：**${d.name}** — ${d.value.toLocaleString()}（占比 ${pct}%）`);
+    parts.push(`Top${i + 1}：**${d.name}** — ${d.value.toLocaleString()}（占比 **${pct}%**）`);
   });
 
   const top3Sum = topN.slice(0, 3).reduce((s, d) => s + (d.value || 0), 0);
   const top3Pct = total > 0 ? ((top3Sum / total) * 100).toFixed(1) : '0';
   if (topN.length >= 3) {
-    parts.push(`Top3 集中度：**${top3Pct}%**（前 3 项合计占总量的 ${top3Pct}%）`);
+    parts.push(`Top3 集中度：**${top3Pct}%**（前 3 项合计占总量 ${top3Pct}%）`);
   }
 
   return parts.join('\n');
 }
 
-const CHART_ANALYSIS_SYSTEM_PROMPT = `你是「VOC 智能问数」的数据分析专家，拥有 15 年汽车行业数据分析经验，精通研产供销服五大核心业务，深度理解 VoC 客户之声系统。
+const CHART_ANALYSIS_SYSTEM_PROMPT = `你是「VOC 智能问数」的数据分析专家，面向车企高管提供精要洞察，要求一眼能看到核心结论。
 
-你的任务是基于图表统计摘要，给出精练的数据解读。严格遵守：
+严格遵守以下输出格式：
 
-1. **只输出 3-5 条核心洞察**，每条不超过 25 字，禁止冗长展开。
-2. **每条必须引用具体数字**，用 ** 加粗关键数据，至少 1 处。
-3. **使用业务语言**，如"**XX车型** 投诉占 **34%**，集中在 **电池亏电**"，而非技术描述。
-4. **先给最关键结论**，再依次展开，不写铺垫句。
-5. **禁止编造**，没有数据支撑不写确定性结论。
-6. **不要输出标题、不要分节、不要总结句**，直接输出要点列表。`;
+**数据全貌**：1 句概括样本量 + 集中度特征，如"共 **N** 条负面反馈，Top3 问题集中度 **XX%**，长尾特征显著"。
+
+**Top 核心发现**（2-3 条，每条独立成段，加粗标题）：
+- 按占比从高到低排列，优先分析 Top1 和具有强关联性的问题组（如"发动机+起动异常"同属动力系统应合并分析）
+- 每条含：数据事实（数量、占比）→ 业务影响 → 排查方向
+- 如 Top1 是"其他/未分类"等笼统类别，重点指出数据采集问题
+
+**行动建议**：1 条具体可落地的建议，不超过 2 句。
+
+核心约束：
+- 每条 Top 发现整段不超过 80 字，高管 10 秒内可扫完
+- 关键数字必须用 ** 加粗
+- 禁止编造字段、车型、标签
+- 使用"动力系统""智能座舱""NVH""IQS"等专业术语`;
 
 async function generateChartAnalysis(
   userQuery: string,
@@ -903,7 +907,7 @@ async function generateChartAnalysis(
 数据统计摘要：
 ${dataSummary}
 
-请基于以上统计摘要，输出 3-5 条核心洞察要点，每条不超过 25 字，直接列出，不要标题和总结句。`;
+请基于以上统计摘要，按格式输出：数据全貌（1句）→ Top3 核心发现（每条加粗标题+2-3句）→ 行动建议（1条）。每条发现整段不超过 80 字，关键数字用 ** 加粗。`;
 
   const { content: answer, usage } = await callDeepSeek(
     [
