@@ -67,21 +67,24 @@ function calcChartWidth(dataLength: number, chartType: string): number {
 
 const RADIAN = Math.PI / 180;
 
-/** 渲染饼图/环形图外部标签（含折线连接） */
+/** 渲染饼图/环形图外部标签（含折线连接），百分比过小不显示，避免重叠 */
 function renderPieLabel(props: Record<string, any>) {
   const { cx, cy, midAngle, outerRadius, percent, name, value } = props;
 
-  if (percent * 100 < 3) return null;
+  if (percent * 100 < 4) return null;
 
   const sin = Math.sin(-midAngle * RADIAN);
   const cos = Math.cos(-midAngle * RADIAN);
 
+  // 交错距离：根据角度周期性错开标签位置，避免相邻标签重叠
+  const stagger = Math.abs(Math.sin(midAngle * 3 * RADIAN)) * 18 + 14;
+
   const radius = outerRadius + 2;
   const sx = cx + radius * cos;
   const sy = cy + radius * sin;
-  const mx = cx + (radius + 12) * cos;
-  const my = cy + (radius + 12) * sin;
-  const ex = mx + (cos >= 0 ? 14 : -14);
+  const mx = cx + (radius + stagger * 0.5) * cos;
+  const my = cy + (radius + stagger * 0.5) * sin;
+  const ex = mx + (cos >= 0 ? stagger : -stagger);
   const ey = my;
 
   const textAnchor = cos >= 0 ? 'start' : 'end';
