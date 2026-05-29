@@ -83,6 +83,7 @@ export default function VocChatLayout({ children }: { children: React.ReactNode 
           selectedTables: selectedSmartTables,
         });
         if (conversationIdForRequest) {
+          hasLoadedRouteSessionRef.current = true;
           setActiveSessionId(conversationIdForRequest);
           window.history.replaceState(null, '', `/chatbi/${conversationIdForRequest}`);
         }
@@ -166,6 +167,7 @@ export default function VocChatLayout({ children }: { children: React.ReactNode 
                 const currentPath = window.location.pathname;
                 const expectedPath = `/chatbi/${data.sessionId}`;
                 if (currentPath !== expectedPath) {
+                  hasLoadedRouteSessionRef.current = true;
                   window.history.replaceState(null, '', expectedPath);
                 }
               }

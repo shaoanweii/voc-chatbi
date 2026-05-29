@@ -129,7 +129,7 @@ export function ChartCard({ data }: ChartCardProps) {
       {data.type === 'bar' && (
         <div style={{ width: needsScroll ? chartWidth : '100%', height: 280 }}>
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={data.data} margin={{ bottom: 8 }} maxBarSize={80} barGap={8}>
+            <BarChart data={data.data} margin={{ bottom: 8 }} barCategoryGap="20%">
               <CartesianGrid strokeDasharray="3 3" stroke="#e6edf4" vertical={false} />
               <XAxis
                 dataKey="name"
@@ -212,7 +212,7 @@ export function ChartCard({ data }: ChartCardProps) {
         return (
           <div style={{ width: needsScroll ? chartWidth : '100%', height: 300 }}>
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={data.data} margin={{ bottom: 8, top: 12 }} maxBarSize={80} barGap={8}>
+              <BarChart data={data.data} margin={{ bottom: 8, top: 12 }} barCategoryGap="20%">
                 <CartesianGrid strokeDasharray="3 3" stroke="#e6edf4" vertical={false} />
                 <XAxis
                   dataKey="name"

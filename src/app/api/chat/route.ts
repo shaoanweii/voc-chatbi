@@ -171,18 +171,20 @@ report 负例：
   "clarifying_question": "需要用户补充的问题"
 }`;
 
-const ANSWER_SYSTEM_PROMPT = `你是「VOC 智能问数」的数据分析助手。
+const ANSWER_SYSTEM_PROMPT = `你是「VOC 智能问数」的数据分析专家，拥有 15 年汽车行业数据分析经验，精通研产供销服五大核心业务，深度理解 VoC 客户之声系统。
 
-你会收到用户问题、已执行 SQL、SQL 查询结果。
-请基于查询结果回答，不要编造不存在的数据。
+你会收到用户问题、已执行的 SQL、以及查询结果的统计摘要和详细数据。请基于查询结果回答，不要编造不存在的数据、字段、车型、标签或业务结论。
 
 回答要求：
-1. 先给直接结论。
-2. 再用 2-5 条要点说明关键数据。
-3. 最后只附一个 \`\`\`sql 代码块，不要写“已执行 SQL”、“SQL 预览”等文字标题。
-4. 如果结果为空，说明没有查询到匹配数据，并提示可能的筛选条件问题。
-5. 语言简洁，偏业务分析表达。;
-6. 禁止在关键数据结论中输出 数据来源xxx等不相关的描述`;
+1. **直接结论先行**：首句给出核心数字和结论，让用户 5 秒内得到答案。
+2. **关键数字加粗**：所有核心数字、指标、关键实体必须使用 ** 包裹，例如”共查询到 **1,247 条** 记录”、”**电池亏电** 问题占比最高（**34.2%**）”。
+3. **分层解读**：
+   - 若结果是单一数值：直接给结论 + 业务含义解读
+   - 若结果是多行列表：先总览数据规模，再分析 Top 项的集中度和趋势，最后给出业务建议
+4. **业务语言表达**：使用”投诉集中在””负面率上升””用户关注度高”等业务表达，而非”查询结果共 N 行”等技术描述。
+5. **数据为空时**：说明未查询到匹配数据，并提示可能的筛选条件或时间范围问题，建议用户调整。
+6. **极简输出**：2-5 条要点即可，不冗余堆砌。最后附一个 \`\`\`sql 代码块展示执行的 SQL，不要加”已执行 SQL”等文字标题。
+7. **只输出结论和 SQL 代码块**，禁止输出”数据来源”、”根据查询结果”等无关描述。`;
 
 const FOLLOW_UP_SYSTEM_PROMPT = `你是「VOC 智能问数」的追问建议生成器。
 
@@ -655,7 +657,7 @@ function streamChartResponse({
         }
 
         const chartData = buildChartDataFromRows(queryRows, chartSpec, userQuery);
-        const { analysis: rawAnalysis, usage: chartAnalysisUsage } = await generateChartAnalysis(userQuery, safeSql, queryRows, chartSpec, reasoningEnabled);
+        const { analysis: rawAnalysis, usage: chartAnalysisUsage } = await generateChartAnalysis(userQuery, safeSql, chartData, chartSpec, reasoningEnabled);
         const analysisContent = rawAnalysis || buildFallbackChartAnalysis(chartData, queryRows.length);
         const { followUps, usage: followUpsUsage } = await generateFollowUps({
           userQuery,
@@ -841,34 +843,70 @@ function topNWithOther(data: ChartDataPoint[], n: number): ChartDataPoint[] {
   return top;
 }
 
+function computeChartStats(chartData: { title: string; type: string; data: ChartDataPoint[] }): string {
+  const { data } = chartData;
+  if (!data || data.length === 0) return '无数据';
+
+  const total = data.reduce((sum, d) => sum + (d.value || 0), 0);
+  const count = data.length;
+  const sorted = [...data].sort((a, b) => (b.value || 0) - (a.value || 0));
+  const maxVal = sorted[0]?.value || 0;
+  const minVal = sorted[sorted.length - 1]?.value || 0;
+  const avgVal = total / count;
+  const variance = sorted.reduce((s, d) => s + Math.pow((d.value || 0) - avgVal, 2), 0) / count;
+  const cv = avgVal > 0 ? (Math.sqrt(variance) / avgVal * 100).toFixed(0) : '0';
+
+  const parts = [
+    `共 **${count}** 条数据，总量 **${total.toLocaleString()}**，均值 **${avgVal.toFixed(1)}**，极差 **${(maxVal - minVal).toLocaleString()}**（最大值 **${maxVal.toLocaleString()}**，最小值 **${minVal.toLocaleString()}**），离散系数 **${cv}%**`,
+  ];
+
+  const topN = sorted.slice(0, 5);
+  topN.forEach((d, i) => {
+    const pct = total > 0 ? ((d.value / total) * 100).toFixed(1) : '0';
+    parts.push(`Top${i + 1}：**${d.name}** — ${d.value.toLocaleString()}（占比 ${pct}%）`);
+  });
+
+  const top3Sum = topN.slice(0, 3).reduce((s, d) => s + (d.value || 0), 0);
+  const top3Pct = total > 0 ? ((top3Sum / total) * 100).toFixed(1) : '0';
+  if (topN.length >= 3) {
+    parts.push(`Top3 集中度：**${top3Pct}%**（前 3 项合计占总量的 ${top3Pct}%）`);
+  }
+
+  return parts.join('\n');
+}
+
+const CHART_ANALYSIS_SYSTEM_PROMPT = `你是「VOC 智能问数」的数据分析专家，拥有 15 年汽车行业数据分析经验，精通研产供销服五大核心业务，深度理解 VoC 客户之声系统。
+
+你的任务是基于图表查询结果，给出专业、精练的数据解读。必须遵循：
+
+1. **数据驱动**：所有结论必须从当前统计摘要中推导，禁止编造未出现的字段、车型、标签或业务结论。没有足够数据支撑时应写"需进一步抽样验证"。
+2. **关键数字加粗**：必须使用 ** 包围核心数字和指标，每条分析至少 1-2 处加粗。
+3. **结构化输出**：先概括数据全貌，再分析 Top 项的集中趋势和业务含义，最后给出业务建议或风险提示。
+4. **语言精练**：3-5 条要点，每条 15-35 字，使用业务语言，不重复 SQL 或技术细节。
+5. **聚焦业务洞察**：如"某车型投诉集中在 **XX问题**（占比 **XX%**）"、"某渠道负面率上升"、"建议优先排查 **XX** 方向"。`;
+
 async function generateChartAnalysis(
   userQuery: string,
   sql: string,
-  rows: Array<Record<string, unknown>>,
+  chartData: { title: string; type: string; data: ChartDataPoint[] },
   chartSpec: ChartSpec | undefined,
   reasoningEnabled: boolean,
 ): Promise<{ analysis: string; usage: DeepSeekUsage | null }> {
-  const sampleRows = rows.slice(0, 10);
+  const dataSummary = computeChartStats(chartData);
+
   const prompt = `用户问题：${userQuery}
 
-已执行 SQL：
-\`\`\`sql
-${sql}
-\`\`\`
+图表标题：${chartData.title || chartSpec?.title || '数据分析图表'}
+图表类型：${chartData.type || chartSpec?.type || 'bar'}
 
-查询结果（前${sampleRows.length}行）：
-${JSON.stringify(sampleRows, null, 2)}
+数据统计摘要：
+${dataSummary}
 
-图表类型：${chartSpec?.type || 'bar'}
-图表标题：${chartSpec?.title || '数据分析图表'}
-维度：${chartSpec?.dimension || '自动识别'}
-指标：${chartSpec?.measure || '自动识别'}
-
-请基于以上查询结果，给出简洁的数据分析结论（3-5条要点），不要重复 SQL 代码块。`;
+请基于以上统计摘要，给出专业的数据解读（3-5 条要点），每一条都必须引用具体数字，并对数字做出业务层面的分析和建议。`;
 
   const { content: answer, usage } = await callDeepSeek(
     [
-      { role: 'system', content: '你是「VOC 智能问数」的数据分析助手。请基于查询结果给出简洁的业务分析结论，语言偏业务表达，3-5条要点即可。' },
+      { role: 'system', content: CHART_ANALYSIS_SYSTEM_PROMPT },
       { role: 'user', content: prompt },
     ],
     { thinking: reasoningEnabled, reasoningEffort: 'high', temperature: 0.2 }
@@ -2556,13 +2594,47 @@ function buildAnswerPrompt({
   rows: Array<Record<string, unknown>>;
   tables: SmartTableContext[];
 }): string {
+  const stats = summarizeQueryRows(rows);
   return [
     `用户问题：${userQuery}`,
     `已选表：${tables.map((table) => `${table.name}("${table.physical_table_name}")`).join('、')}`,
     `已执行 SQL：\n${sql}`,
-    `查询结果行数：${rows.length}`,
-    `查询结果 JSON：\n${JSON.stringify(rows.map((row) => sanitizeRow(row, 220)), null, 2)}`,
+    stats,
   ].join('\n\n');
+}
+
+function summarizeQueryRows(rows: Array<Record<string, unknown>>): string {
+  if (rows.length === 0) return '查询结果：**0 条**记录';
+
+  const keys = Object.keys(rows[0] || {});
+  const numKeys = keys.filter((k) => typeof rows[0]?.[k] === 'number');
+  const strKeys = keys.filter((k) => typeof rows[0]?.[k] === 'string');
+
+  if (rows.length === 1 && numKeys.length === 1 && strKeys.length <= 1) {
+    return `查询结果（单一数值）：**${rows[0][numKeys[0]]}**${strKeys[0] ? `（${strKeys[0]}：${rows[0][strKeys[0]]}）` : ''}`;
+  }
+
+  const parts = [`查询结果：共 **${rows.length}** 条记录`];
+
+  if (numKeys.length > 0) {
+    for (const nk of numKeys.slice(0, 2)) {
+      const values = rows.map((r) => Number(r[nk]) || 0);
+      const total = values.reduce((a, b) => a + b, 0);
+      const avg = total / rows.length;
+      const max = Math.max(...values);
+      const min = Math.min(...values);
+      parts.push(`「${nk}」：总计 **${total.toLocaleString()}**，均值 **${avg.toFixed(1)}**，范围 **${min.toLocaleString()}** ~ **${max.toLocaleString()}**`);
+    }
+  }
+
+  // Top 5 条明细
+  if (rows.length > 1) {
+    parts.push(`明细数据（前 5 条）：\n${JSON.stringify(rows.slice(0, 5).map((r) => sanitizeRow(r, 120)), null, 2)}`);
+  } else {
+    parts.push(`明细数据：\n${JSON.stringify(rows.map((r) => sanitizeRow(r, 120)), null, 2)}`);
+  }
+
+  return parts.join('\n');
 }
 
 async function generateFollowUps({
