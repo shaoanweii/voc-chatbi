@@ -50,20 +50,24 @@ const tooltipStyle: React.CSSProperties = {
 
 const tooltipCursorStyle = { fill: 'rgba(148,163,184,0.08)' };
 
-const MIN_ITEM_WIDTH_BAR = 56;
-const MIN_ITEM_WIDTH_LINE = 72;
-const CONTAINER_MIN_WIDTH = 500;
+const SCROLL_THRESHOLD = 14; // 超过此数量的条目才启用横向滚动
+const MIN_ITEM_WIDTH_BAR = 48;
+const MIN_ITEM_WIDTH_LINE = 60;
+
+function needsHorizontalScroll(dataLength: number, chartType: string): boolean {
+  if (chartType === 'donut' || chartType === 'pie') return false;
+  return dataLength > SCROLL_THRESHOLD;
+}
 
 function calcChartWidth(dataLength: number, chartType: string): number {
   if (chartType === 'donut' || chartType === 'pie') return 240;
-  if (chartType === 'stackedBar') return Math.max(dataLength * 72, CONTAINER_MIN_WIDTH);
   const itemWidth = chartType === 'line' ? MIN_ITEM_WIDTH_LINE : MIN_ITEM_WIDTH_BAR;
-  return Math.max(dataLength * itemWidth, CONTAINER_MIN_WIDTH);
+  return dataLength * itemWidth;
 }
 
 const RADIAN = Math.PI / 180;
 
-/** 渲染饼图/环形图外部标签（含折线连接），避免标签被遮挡 */
+/** 渲染饼图/环形图外部标签（含折线连接） */
 function renderPieLabel(props: Record<string, any>) {
   const { cx, cy, midAngle, outerRadius, percent, name } = props;
 
@@ -72,15 +76,16 @@ function renderPieLabel(props: Record<string, any>) {
   const sin = Math.sin(-midAngle * RADIAN);
   const cos = Math.cos(-midAngle * RADIAN);
 
-  const sx = cx + (outerRadius + 4) * cos;
-  const sy = cy + (outerRadius + 4) * sin;
-  const mx = cx + (outerRadius + 20) * cos;
-  const my = cy + (outerRadius + 20) * sin;
-  const ex = mx + (cos >= 0 ? 20 : -20);
+  const radius = outerRadius + 2;
+  const sx = cx + radius * cos;
+  const sy = cy + radius * sin;
+  const mx = cx + (radius + 12) * cos;
+  const my = cy + (radius + 12) * sin;
+  const ex = mx + (cos >= 0 ? 14 : -14);
   const ey = my;
 
   const textAnchor = cos >= 0 ? 'start' : 'end';
-  const displayName = String(name).length > 8 ? `${String(name).slice(0, 8)}..` : String(name);
+  const displayName = String(name).length > 6 ? `${String(name).slice(0, 6)}..` : String(name);
 
   return (
     <g>
@@ -111,7 +116,7 @@ export function ChartCard({ data }: ChartCardProps) {
     [data.data.length, data.type],
   );
 
-  const needsScroll = data.type !== 'donut' && data.type !== 'pie' && chartWidth > CONTAINER_MIN_WIDTH;
+  const needsScroll = needsHorizontalScroll(data.data.length, data.type);
 
   const chartContent = (
     <>
@@ -127,7 +132,7 @@ export function ChartCard({ data }: ChartCardProps) {
       </svg>
 
       {data.type === 'bar' && (
-        <div style={{ width: needsScroll ? chartWidth : '100%', height: 280 }}>
+        <div style={{ width: '100%', height: 280, minWidth: needsScroll ? chartWidth : undefined }}>
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={data.data} margin={{ bottom: 8 }} barCategoryGap="20%">
               <CartesianGrid strokeDasharray="3 3" stroke="#e6edf4" vertical={false} />
@@ -163,9 +168,9 @@ export function ChartCard({ data }: ChartCardProps) {
       )}
 
       {data.type === 'line' && (
-        <div style={{ width: needsScroll ? chartWidth : '100%', height: 280 }}>
+        <div style={{ width: '100%', height: 280, minWidth: needsScroll ? chartWidth : undefined }}>
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={data.data} margin={{ bottom: 8 }}>
+            <LineChart data={data.data} margin={{ top: 8, right: 8, bottom: 8, left: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#e6edf4" vertical={false} />
               <XAxis
                 dataKey="name"
@@ -188,12 +193,12 @@ export function ChartCard({ data }: ChartCardProps) {
                 formatter={(value: number) => [value.toLocaleString(), data.subtitle || '数量']}
               />
               <Line
-                type="monotone"
+                type="linear"
                 dataKey="value"
-                stroke="#9adcc3"
+                stroke="#6366f1"
                 strokeWidth={2.5}
-                dot={{ fill: '#64cfa6', r: 4, strokeWidth: 0 }}
-                activeDot={{ fill: '#9adcc3', r: 6, strokeWidth: 2, stroke: '#fff' }}
+                dot={{ fill: '#6366f1', r: 3, strokeWidth: 0 }}
+                activeDot={{ fill: '#6366f1', r: 5, strokeWidth: 2, stroke: '#fff' }}
               />
             </LineChart>
           </ResponsiveContainer>
@@ -210,7 +215,7 @@ export function ChartCard({ data }: ChartCardProps) {
         const stackColors = ['#9adcc3', '#83a7ee', '#b69aef', '#83cbdf', '#e4b494', '#f0d4c3', '#d9c6f8', '#bde5f0'];
 
         return (
-          <div style={{ width: needsScroll ? chartWidth : '100%', height: 300 }}>
+          <div style={{ width: '100%', height: 300, minWidth: needsScroll ? chartWidth : undefined }}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={data.data} margin={{ bottom: 8, top: 12 }} barCategoryGap="20%">
                 <CartesianGrid strokeDasharray="3 3" stroke="#e6edf4" vertical={false} />
@@ -252,8 +257,8 @@ export function ChartCard({ data }: ChartCardProps) {
 
       {data.type === 'donut' && (
         <div className="flex flex-col items-center">
-          <ResponsiveContainer width={400} height={320}>
-            <PieChart margin={{ top: 10, right: 60, bottom: 10, left: 60 }}>
+          <ResponsiveContainer width={480} height={340}>
+            <PieChart margin={{ top: 10, right: 100, bottom: 10, left: 100 }}>
               <Tooltip
                 contentStyle={tooltipStyle}
                 formatter={(value: number, _name: string, props: any) => {
@@ -267,8 +272,8 @@ export function ChartCard({ data }: ChartCardProps) {
                 data={data.data}
                 cx="50%"
                 cy="50%"
-                innerRadius={55}
-                outerRadius={85}
+                innerRadius={50}
+                outerRadius={80}
                 dataKey="value"
                 nameKey="name"
                 stroke="none"
@@ -302,8 +307,8 @@ export function ChartCard({ data }: ChartCardProps) {
 
       {data.type === 'pie' && (
         <div className="flex flex-col items-center">
-          <ResponsiveContainer width={400} height={320}>
-            <PieChart margin={{ top: 10, right: 60, bottom: 10, left: 60 }}>
+          <ResponsiveContainer width={480} height={340}>
+            <PieChart margin={{ top: 10, right: 100, bottom: 10, left: 100 }}>
               <Tooltip
                 contentStyle={tooltipStyle}
                 formatter={(value: number, _name: string) => {
@@ -317,7 +322,7 @@ export function ChartCard({ data }: ChartCardProps) {
                 cx="50%"
                 cy="50%"
                 innerRadius={0}
-                outerRadius={85}
+                outerRadius={80}
                 dataKey="value"
                 nameKey="name"
                 stroke="#fff"

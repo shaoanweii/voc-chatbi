@@ -3,6 +3,7 @@
 import Image from 'next/image';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
+import { Eye, EyeOff } from 'lucide-react';
 import { apiProfileToUserProfile, saveUserProfileCache } from '@/components/auth-provider';
 import styles from './page.module.css';
 
@@ -44,6 +45,9 @@ export default function LoginPage() {
   const [isLoginLoading, setIsLoginLoading] = useState(false);
   const [isRegisterLoading, setIsRegisterLoading] = useState(false);
   const [isSmsSending, setIsSmsSending] = useState(false);
+  const [showLoginPwd, setShowLoginPwd] = useState(false);
+  const [showRegPwd, setShowRegPwd] = useState(false);
+  const [showConfirmPwd, setShowConfirmPwd] = useState(false);
   const isAccountLogin = activeTab === 'account';
   const showAccountError = hasTriedLogin && accountId.trim().length === 0;
   const showCaptchaError = hasTriedLogin && captchaValue.trim().length > 0 && captchaValue.trim() !== captchaCode;
@@ -361,7 +365,7 @@ export default function LoginPage() {
                 <div className={styles.inputWrap}>
                   <input
                     className={styles.input}
-                    type="password"
+                    type={showLoginPwd ? 'text' : 'password'}
                     placeholder="请输入登录密码"
                     value={password}
                     onChange={(event) => {
@@ -369,7 +373,9 @@ export default function LoginPage() {
                       setLoginError('');
                     }}
                   />
-                  <span className={styles.eye}>◌</span>
+                  <button type="button" className={styles.eye} onClick={() => setShowLoginPwd(!showLoginPwd)}>
+                    {showLoginPwd ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
                 </div>
               </div>
               <div className={styles.field}>
@@ -426,7 +432,7 @@ export default function LoginPage() {
                 <div className={styles.inputWrap}>
                   <input
                     className={styles.input}
-                    type="password"
+                    type={showRegPwd ? 'text' : 'password'}
                     value={password}
                     onChange={(event) => {
                       setPassword(event.target.value);
@@ -434,14 +440,16 @@ export default function LoginPage() {
                     }}
                     placeholder="请输入密码"
                   />
-                  <span className={styles.eye}>◌</span>
+                  <button type="button" className={styles.eye} onClick={() => setShowRegPwd(!showRegPwd)}>
+                    {showRegPwd ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
                 </div>
               </div>
               <div className={styles.field}>
                 <div className={styles.inputWrap}>
                   <input
                     className={styles.input}
-                    type="password"
+                    type={showConfirmPwd ? 'text' : 'password'}
                     value={confirmPassword}
                     onChange={(event) => {
                       setConfirmPassword(event.target.value);
@@ -449,7 +457,9 @@ export default function LoginPage() {
                     }}
                     placeholder="请确认密码"
                   />
-                  <span className={styles.eye}>◌</span>
+                  <button type="button" className={styles.eye} onClick={() => setShowConfirmPwd(!showConfirmPwd)}>
+                    {showConfirmPwd ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
                 </div>
               </div>
               {loginError && (

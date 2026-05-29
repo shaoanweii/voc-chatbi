@@ -626,8 +626,8 @@ export function ChatView({
                     <div className="ml-14 flex flex-col gap-4">
                       <ChartCard data={msg.chart} />
                       <div className="rounded-[22px] border border-white/65 bg-white/52 p-5 shadow-[0_18px_48px_rgba(15,23,42,0.06)] backdrop-blur-xl">
-                        <div className="mb-3 text-sm font-extrabold text-slate-800">{msg.chart.title || '图表'} 解读</div>
-                        <div className="text-sm leading-7 text-slate-600">
+                        <div className="mb-3 text-[15px] font-extrabold text-[#0066CC]">{msg.chart.title || '图表'} 解读</div>
+                        <div className="text-[14px] leading-7 text-[#333333]">
                           <MarkdownRenderer content={msg.content || '暂无解读内容，请查看图表数据。'} />
                         </div>
                       </div>
