@@ -27,9 +27,6 @@ const markdownComponents: Components = {
     </h4>
   ),
   p: ({ children }) => {
-    const text = typeof children === 'string' ? children : '';
-    const isEmpty = text.trim() === '' || (Array.isArray(children) && children.length === 0);
-    if (isEmpty) return null;
     return <p className="my-2 text-[14px] leading-[1.75] text-slate-600">{children}</p>;
   },
   strong: ({ children }) => (
