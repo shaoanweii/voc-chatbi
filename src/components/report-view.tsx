@@ -42,13 +42,13 @@ function renderBoldText(text: string): ReactNode {
   if (parts.length === 1) return text;
   return parts.map((part, i) => {
     if (part.startsWith('**') && part.endsWith('**')) {
-      return <strong key={i} className="font-extrabold text-slate-800">{part.slice(2, -2)}</strong>;
+      return <strong key={i} className="font-extrabold text-[#333333]">{part.slice(2, -2)}</strong>;
     }
     return part || null;
   });
 }
 
-const CHART_COLORS = ['#64cfa6', '#83a7ee', '#b69aef', '#83cbdf', '#e4b494', '#f2bf5e', '#7dd3fc'];
+const CHART_COLORS = ['#0ea5e9', '#06b6d4', '#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#84cc16'];
 type ExportFormat = 'png' | 'pdf';
 interface RenderReportCanvasOptions {
   pixelRatio: number;
@@ -96,8 +96,8 @@ export function ReportView({ report }: ReportViewProps) {
     <div ref={reportContentRef} className="mt-5 space-y-5">
       <section className="rounded-[22px] border border-white/65 bg-white/58 p-5 shadow-[0_18px_48px_rgba(15,23,42,0.07)] backdrop-blur-xl">
         <div className="flex flex-col items-center text-center">
-          <h3 className="text-[22px] font-extrabold leading-tight text-slate-900">{report.title}</h3>
-          <p className="mt-2 text-xs text-slate-400">
+          <h3 className="text-[22px] font-extrabold leading-tight text-[#0066CC]">{report.title}</h3>
+          <p className="mt-2 text-xs text-[#009999]">
             {formatTimeRange(report)} · 样本 {report.recordCount.toLocaleString()} 条
           </p>
         </div>
@@ -106,7 +106,7 @@ export function ReportView({ report }: ReportViewProps) {
       {report.executiveSummary && (
         <section className="rounded-[22px] border border-white/65 bg-white/54 p-5 shadow-[0_18px_48px_rgba(15,23,42,0.06)] backdrop-blur-xl">
           <SectionTitle order={nextOrder()} title="全文摘要" />
-          <p className="text-sm leading-7 text-slate-600">{renderBoldText(report.executiveSummary)}</p>
+          <p className="text-sm leading-7 text-[#333333]">{renderBoldText(report.executiveSummary)}</p>
         </section>
       )}
 
@@ -131,7 +131,7 @@ export function ReportView({ report }: ReportViewProps) {
                   <thead>
                     <tr>
                       {table.columns.map((column) => (
-                        <th key={column} className="border-b border-slate-200/70 px-3 py-2 text-left text-xs font-bold text-slate-400">
+                        <th key={column} className="border-b border-slate-200/70 px-3 py-2 text-left text-xs font-bold text-[#009999]">
                           {column}
                         </th>
                       ))}
@@ -141,7 +141,7 @@ export function ReportView({ report }: ReportViewProps) {
                     {table.rows.slice(0, 10).map((row, rowIndex) => (
                       <tr key={`${table.id}-${rowIndex}`}>
                         {table.columns.map((column) => (
-                          <td key={column} className="border-b border-slate-100/70 px-3 py-2 text-slate-600">
+                          <td key={column} className="border-b border-slate-100/70 px-3 py-2 text-[#333333]">
                             {String(row[column] ?? '')}
                           </td>
                         ))}
@@ -157,7 +157,7 @@ export function ReportView({ report }: ReportViewProps) {
 
       <section className="rounded-[22px] border border-white/65 bg-white/54 p-5 shadow-[0_18px_48px_rgba(15,23,42,0.06)] backdrop-blur-xl">
         <SectionTitle order={nextOrder()} title="模型深度分析" icon={<Lightbulb className="h-4 w-4 text-amber-500" />} />
-        <p className="text-sm leading-7 text-slate-600">{renderBoldText(finalSummary.summary) || '系统已完成数据筛选、维度分布、根因关键词和可视化图表生成，请参阅下方分析组。'}</p>
+        <p className="text-sm leading-7 text-[#333333]">{renderBoldText(finalSummary.summary) || '系统已完成数据筛选、维度分布、根因关键词和可视化图表生成，请参阅下方分析组。'}</p>
 
         <div className="mt-4 grid gap-2 lg:grid-cols-1">
           {analysisGroups.map((group, index) => (
@@ -176,7 +176,7 @@ export function ReportView({ report }: ReportViewProps) {
           <SectionTitle order={nextOrder()} title="处理建议" icon={<Lightbulb className="h-4 w-4 text-purple-500" />} />
           <div className="space-y-3">
             {report.recommendations.slice(0, 5).map((item, index) => (
-              <div key={item} className="flex gap-3 rounded-[16px] bg-white/58 px-3 py-3 text-sm leading-relaxed text-slate-600">
+              <div key={item} className="flex gap-3 rounded-[16px] bg-white/58 px-3 py-3 text-sm leading-relaxed text-[#333333]">
                 <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-purple-50 text-xs font-extrabold text-purple-500">
                   {index + 1}
                 </span>
@@ -187,7 +187,7 @@ export function ReportView({ report }: ReportViewProps) {
         </section>
       )}
 
-      <div className="flex items-center justify-between gap-3 px-1 text-xs font-medium text-slate-400" data-report-export-hide="true">
+      <div className="flex items-center justify-between gap-3 px-1 text-xs font-medium text-[#009999]" data-report-export-hide="true">
         <span>以上分析结论基于数据表前1万行数据，AI 内容仅供参考，请理性辨别。</span>
         <div className="flex items-center gap-2">
           {exportError && <span className="text-[11px] text-rose-400">{exportError}</span>}
@@ -196,7 +196,7 @@ export function ReportView({ report }: ReportViewProps) {
               <button
                 type="button"
                 disabled={Boolean(exporting)}
-                className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/70 bg-white/65 text-slate-400 shadow-[0_8px_22px_rgba(15,23,42,0.06)] backdrop-blur-xl transition hover:bg-white/90 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/70 bg-white/65 text-[#009999] shadow-[0_8px_22px_rgba(15,23,42,0.06)] backdrop-blur-xl transition hover:bg-white/90 hover:text-[#333333] disabled:cursor-not-allowed disabled:opacity-60"
                 aria-label="报告操作"
               >
                 {exporting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <MoreHorizontal className="h-4 w-4" />}
@@ -206,7 +206,7 @@ export function ReportView({ report }: ReportViewProps) {
               <DropdownMenuItem
                 disabled={Boolean(exporting)}
                 onClick={() => void handleExport('png')}
-                className="cursor-pointer rounded-xl text-xs font-semibold text-slate-600"
+                className="cursor-pointer rounded-xl text-xs font-semibold text-[#333333]"
               >
                 <FileImage className="mr-2 h-3.5 w-3.5 text-blue-500" />
                 导出图片
@@ -214,7 +214,7 @@ export function ReportView({ report }: ReportViewProps) {
               <DropdownMenuItem
                 disabled={Boolean(exporting)}
                 onClick={() => void handleExport('pdf')}
-                className="cursor-pointer rounded-xl text-xs font-semibold text-slate-600"
+                className="cursor-pointer rounded-xl text-xs font-semibold text-[#333333]"
               >
                 <FileDown className="mr-2 h-3.5 w-3.5 text-purple-500" />
                 导出 PDF
@@ -233,8 +233,8 @@ function ChartExplanationPanel({ chart, report }: { chart: SmartReportChart; rep
 
   return (
     <div className="rounded-[22px] border border-white/65 bg-white/52 p-5 shadow-[0_18px_48px_rgba(15,23,42,0.06)] backdrop-blur-xl">
-      <div className="mb-3 text-sm font-extrabold text-slate-800">{explanation?.title || `${chart.title}解读`}</div>
-      <p className="text-sm leading-7 text-slate-600">
+      <div className="mb-3 text-sm font-extrabold text-[#0066CC]">{explanation?.title || `${chart.title}解读`}</div>
+      <p className="text-sm leading-7 text-[#333333]">
         {renderBoldText(explanation?.explanation || rootCauseText || buildFallbackChartExplanation(chart))}
       </p>
     </div>
@@ -257,7 +257,7 @@ function SummaryList({ title, items, tone }: { title: string; items: string[]; t
       <div className={`mb-3 inline-flex rounded-full px-2.5 py-1 text-xs font-extrabold ${toneClass}`}>{title}</div>
       <div className="space-y-2">
         {items.slice(0, 4).map((item) => (
-          <div key={item} className="text-sm leading-relaxed text-slate-600">{renderBoldText(item)}</div>
+          <div key={item} className="text-sm leading-relaxed text-[#333333]">{renderBoldText(item)}</div>
         ))}
       </div>
     </div>
@@ -496,8 +496,8 @@ function parsePercent(value: unknown): number {
 
 function SectionTitle({ order, title, icon }: { order: string; title: string; icon?: ReactNode }) {
   return (
-    <div className="mb-3 flex items-center gap-2 text-base font-extrabold text-slate-800">
-      {order && <span className="text-slate-950">{order}、</span>}
+    <div className="mb-3 flex items-center gap-2 text-base font-extrabold text-[#0066CC]">
+      {order && <span className="text-[#0066CC]">{order}、</span>}
       {icon}
       {title}
     </div>
@@ -543,7 +543,7 @@ function ReportChartCard({ chart, order }: { chart: SmartReportChart; order?: st
       <div className="mb-4 flex items-start justify-between gap-3">
         <div>
           <SectionTitle order={order || ''} title={buildChartSectionTitle(chart)} icon={<BarChart3 className="h-4 w-4 text-blue-500" />} />
-          {chart.subtitle && <div className="mt-1 text-xs text-slate-400">{chart.subtitle}</div>}
+          {chart.subtitle && <div className="mt-1 text-xs text-[#009999]">{chart.subtitle}</div>}
         </div>
       </div>
 
@@ -555,7 +555,7 @@ function ReportChartCard({ chart, order }: { chart: SmartReportChart; order?: st
               <XAxis dataKey={dimension} tick={renderAxisTick} axisLine={false} tickLine={false} />
               <YAxis tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} tickLine={false} width={44} />
               <Tooltip />
-              <Line type="monotone" dataKey={measure} stroke="#64cfa6" strokeWidth={2.5} dot={{ fill: '#64cfa6', r: 4, strokeWidth: 0 }} />
+              <Line type="monotone" dataKey={measure} stroke="#6366f1" strokeWidth={2.5} dot={{ fill: '#64cfa6', r: 4, strokeWidth: 0 }} />
             </LineChart>
           </ResponsiveContainer>
         ) : chart.type === 'pie' || chart.type === 'donut' ? (
@@ -563,13 +563,13 @@ function ReportChartCard({ chart, order }: { chart: SmartReportChart; order?: st
             <ResponsiveContainer width="100%" height={280}>
               <PieChart>
                 <Tooltip
-                  formatter={(value: number) => {
+                  formatter={(value: number, name: string) => {
                     const total = chart.data.reduce((sum, d) => {
                       const v = d[measure];
                       return sum + (typeof v === 'number' ? v : 0);
                     }, 0);
                     const pct = total > 0 ? ((value / total) * 100).toFixed(1) : '0';
-                    return [`${value.toLocaleString()}（${pct}%）`, measure];
+                    return [`${value.toLocaleString()}（${pct}%）`, name || measure];
                   }}
                 />
                 <Pie
@@ -581,7 +581,7 @@ function ReportChartCard({ chart, order }: { chart: SmartReportChart; order?: st
                   innerRadius={chart.type === 'donut' ? 60 : 0}
                   outerRadius={92}
                   stroke="none"
-                  label={({ percent }) => `${(percent * 100).toFixed(1)}%`}
+                  label={({ name, value, percent }) => `${String(name).length > 6 ? `${String(name).slice(0, 6)}..` : String(name)} ${Number(value).toLocaleString()}（${(percent * 100).toFixed(1)}%）`}
                   labelLine={false}
                 >
                   {chart.data.map((_entry, index) => (
@@ -601,14 +601,14 @@ function ReportChartCard({ chart, order }: { chart: SmartReportChart; order?: st
                 }, 0);
                 const pct = total > 0 ? ((Number(val || 0) / total) * 100).toFixed(1) : '0';
                 return (
-                  <div key={index} className="flex items-center gap-1.5 text-xs text-slate-500">
+                  <div key={index} className="flex items-center gap-1.5 text-xs text-[#009999]">
                     <span
                       className="inline-block h-2.5 w-2.5 shrink-0 rounded-sm"
                       style={{ backgroundColor: CHART_COLORS[index % CHART_COLORS.length] }}
                     />
                     <span className="max-w-[120px] truncate">{name}</span>
-                    <span className="font-semibold text-slate-700">{displayVal}</span>
-                    <span className="text-slate-400">（{pct}%）</span>
+                    <span className="font-semibold text-[#333333]">{displayVal}</span>
+                    <span className="text-[#009999]">（{pct}%）</span>
                   </div>
                 );
               })}

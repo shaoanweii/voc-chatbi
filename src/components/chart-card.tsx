@@ -69,7 +69,7 @@ const RADIAN = Math.PI / 180;
 
 /** 渲染饼图/环形图外部标签（含折线连接） */
 function renderPieLabel(props: Record<string, any>) {
-  const { cx, cy, midAngle, outerRadius, percent, name } = props;
+  const { cx, cy, midAngle, outerRadius, percent, name, value } = props;
 
   if (percent * 100 < 3) return null;
 
@@ -103,8 +103,9 @@ function renderPieLabel(props: Record<string, any>) {
         fontSize={11}
         fill="#475569"
       >
-        <tspan fontWeight={500}>{displayName}</tspan>
-        <tspan fill="#94a3b8"> {(percent * 100).toFixed(1)}%</tspan>
+        <tspan fontWeight={600}>{displayName}</tspan>
+        <tspan fill="#334155"> {value.toLocaleString()}</tspan>
+        <tspan fill="#94a3b8">（{(percent * 100).toFixed(1)}%）</tspan>
       </text>
     </g>
   );
