@@ -1,0 +1,49 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - navigation [ref=e3]:
+      - generic [ref=e4]:
+        - button [ref=e5]:
+          - img [ref=e6]
+        - generic [ref=e8]:
+          - heading "数据准备" [level=1] [ref=e9]
+          - paragraph [ref=e10]: VOC ABI V3.0
+      - generic [ref=e11]:
+        - button "数据源接入" [ref=e12]: 数据源接入
+        - button "数据源建表" [ref=e14]
+        - button "数据源列表" [ref=e15]
+      - generic [ref=e16]:
+        - button [ref=e17]:
+          - img [ref=e18]
+        - button [ref=e21]:
+          - img [ref=e22]
+        - generic [ref=e24]: U
+    - generic [ref=e26]:
+      - generic [ref=e27]:
+        - generic [ref=e28]: 智能问数的数据基座
+        - heading "数据源管理中心" [level=2] [ref=e30]
+      - generic [ref=e31]:
+        - button "关系性数据源接入 企业自有一方数据库，连通性测试 MySQL PostgreSQL SQL Server ... 连接数据库" [ref=e32]:
+          - generic [ref=e35]:
+            - heading "关系性数据源接入" [level=3] [ref=e36]
+            - paragraph [ref=e37]: 企业自有一方数据库，连通性测试
+            - generic [ref=e38]:
+              - generic [ref=e39]: MySQL
+              - generic [ref=e40]: PostgreSQL
+              - generic [ref=e41]: SQL Server
+              - generic [ref=e42]: ...
+            - generic [ref=e43]: 连接数据库
+        - button "本地文件上传 本地文件上传。支持 Excel / CSV 拖拽解析，自动识别表头、数据类型。 Excel CSV 一键建表 上传并建表" [ref=e47]:
+          - generic [ref=e49]:
+            - generic [ref=e50]:
+              - heading "本地文件上传" [level=3] [ref=e51]
+              - paragraph [ref=e52]: 本地文件上传。支持 Excel / CSV 拖拽解析，自动识别表头、数据类型。
+              - generic [ref=e53]:
+                - generic [ref=e54]: Excel
+                - generic [ref=e55]: CSV
+                - generic [ref=e56]: 一键建表
+              - generic [ref=e57]: 上传并建表
+            - generic [ref=e60]: ↑
+      - paragraph [ref=e61]: PRO Engine v3.0
+  - button "Open Next.js Dev Tools" [ref=e67] [cursor=pointer]:
+    - img [ref=e68]
+  - alert [ref=e71]

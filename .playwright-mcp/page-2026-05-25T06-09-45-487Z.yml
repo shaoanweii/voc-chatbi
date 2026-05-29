@@ -1,0 +1,59 @@
+- generic:
+  - generic:
+    - banner:
+      - generic:
+        - generic:
+          - strong: 智能问数
+          - generic: AI Data Copilot
+        - generic:
+          - button:
+            - img
+          - button:
+            - img
+          - generic: U
+    - main:
+      - generic:
+        - heading [level=1]: 用自然语言，直接得到业务答案
+        - paragraph: 你身边的汽车数据分析专家，连接数据库或上传表格，自动生成 SQL、图表与分析结论
+        - generic:
+          - button:
+            - img
+            - text: 历史记录
+          - button:
+            - img
+            - text: 选取数据表
+        - generic:
+          - generic:
+            - img
+          - textbox:
+            - /placeholder: 请输入您的问题...
+          - button:
+            - img
+            - generic: 推理
+          - button [disabled]:
+            - img
+        - generic:
+          - button: 分析上月销量异常
+          - button: 生成同比报表
+          - button: 查看客户结构变化
+    - contentinfo: 数据仅在当前会话中使用，不会存储或用于训练模型
+  - alert
+  - dialog "选取数据表" [ref=e2]:
+    - generic [ref=e4]:
+      - generic [ref=e5]:
+        - heading "选取数据表" [level=2] [ref=e6]
+        - paragraph [ref=e7]: 勾选本次问数要使用的数据表
+      - generic [ref=e8]: 已选 0
+    - generic [ref=e9]:
+      - generic [ref=e10]:
+        - img [ref=e11]
+        - textbox "搜索表名、文件名或目录" [active] [ref=e14]
+      - generic [ref=e16]:
+        - img [ref=e17]
+        - generic [ref=e19]: NoTable
+    - generic [ref=e20]:
+      - button "清空" [ref=e21]
+      - button "确认" [ref=e22]
+    - button "Close" [ref=e23]:
+      - img
+      - generic [ref=e24]: Close
