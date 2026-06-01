@@ -54,6 +54,12 @@ interface RenderReportCanvasOptions {
   pixelRatio: number;
 }
 
+const EXPORT_SAFE_PADDING = 48;
+const PDF_MIN_PAGE_SLICE_RATIO = 0.68;
+const PDF_PAGE_BREAK_SEARCH_PX = 320;
+const PDF_PAGE_BREAK_BAND_PX = 14;
+const PDF_PAGE_BREAK_SAMPLE_STEP = 12;
+
 export function ReportView({ report }: ReportViewProps) {
   const reportContentRef = useRef<HTMLDivElement>(null);
   const [exporting, setExporting] = useState<ExportFormat | null>(null);
@@ -266,13 +272,102 @@ function SummaryList({ title, items, tone }: { title: string; items: string[]; t
 
 async function renderReportCanvas(target: HTMLElement, options: RenderReportCanvasOptions): Promise<HTMLCanvasElement> {
   const { toCanvas } = await import('html-to-image');
+  await waitForExportLayout();
 
-  return toCanvas(target, {
-    backgroundColor: '#f8fbff',
-    cacheBust: true,
-    pixelRatio: options.pixelRatio,
-    filter: (node) => !(node instanceof HTMLElement && node.dataset.reportExportHide === 'true'),
+  const exportTarget = createReportExportTarget(target);
+  try {
+    await waitForExportLayout();
+
+    const width = Math.ceil(Math.max(exportTarget.node.scrollWidth, exportTarget.node.offsetWidth, exportTarget.node.clientWidth));
+    const height = Math.ceil(Math.max(exportTarget.node.scrollHeight, exportTarget.node.offsetHeight, exportTarget.node.clientHeight));
+
+    return await toCanvas(exportTarget.node, {
+      backgroundColor: '#f8fbff',
+      cacheBust: true,
+      width,
+      height,
+      canvasWidth: width,
+      canvasHeight: height,
+      pixelRatio: options.pixelRatio,
+      style: {
+        width: `${width}px`,
+        height: `${height}px`,
+        maxHeight: 'none',
+        overflow: 'visible',
+        transform: 'none',
+        animation: 'none',
+        transition: 'none',
+      },
+      filter: (node) => !(node instanceof HTMLElement && node.dataset.reportExportHide === 'true'),
+    });
+  } finally {
+    exportTarget.container.remove();
+  }
+}
+
+async function waitForExportLayout() {
+  if (document.fonts?.ready) {
+    await document.fonts.ready;
+  }
+
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+}
+
+function createReportExportTarget(target: HTMLElement): { container: HTMLElement; node: HTMLElement } {
+  const sourceWidth = Math.ceil(target.getBoundingClientRect().width || target.scrollWidth || target.clientWidth);
+  const wrapper = document.createElement('div');
+  wrapper.dataset.reportExportRoot = 'true';
+  Object.assign(wrapper.style, {
+    position: 'fixed',
+    left: '-10000px',
+    top: '0',
+    width: `${sourceWidth}px`,
+    maxWidth: 'none',
+    margin: '0',
+    padding: '0',
+    overflow: 'visible',
+    background: '#f8fbff',
+    pointerEvents: 'none',
+    zIndex: '-1',
   });
+
+  const style = document.createElement('style');
+  style.textContent = `
+    [data-report-export-root],
+    [data-report-export-root] * {
+      box-sizing: border-box;
+      max-height: none !important;
+      overflow: visible !important;
+      animation: none !important;
+      transition: none !important;
+      backdrop-filter: none !important;
+      -webkit-backdrop-filter: none !important;
+    }
+    [data-report-export-root] svg,
+    [data-report-export-root] svg * {
+      overflow: visible !important;
+    }
+  `;
+
+  const clone = target.cloneNode(true) as HTMLElement;
+  clone.querySelectorAll('[data-report-export-hide="true"]').forEach((node) => node.remove());
+  Object.assign(clone.style, {
+    width: '100%',
+    maxWidth: 'none',
+    height: 'auto',
+    minHeight: '0',
+    maxHeight: 'none',
+    margin: '0',
+    paddingBottom: `${EXPORT_SAFE_PADDING}px`,
+    overflow: 'visible',
+    background: '#f8fbff',
+  });
+
+  wrapper.append(style, clone);
+  document.body.appendChild(wrapper);
+
+  return { container: wrapper, node: clone };
 }
 
 async function downloadPdf(canvas: HTMLCanvasElement, fileName: string) {
@@ -284,11 +379,12 @@ async function downloadPdf(canvas: HTMLCanvasElement, fileName: string) {
   const contentWidth = pageWidth - margin * 2;
   const contentHeight = pageHeight - margin * 2;
   const pageSliceHeight = Math.floor((contentHeight / contentWidth) * canvas.width);
+  const canvasContext = canvas.getContext('2d', { willReadFrequently: true });
   let sourceY = 0;
   let pageIndex = 0;
 
   while (sourceY < canvas.height) {
-    const sliceHeight = Math.min(pageSliceHeight, canvas.height - sourceY);
+    const sliceHeight = findPdfPageSliceHeight(canvas, sourceY, pageSliceHeight, canvasContext);
     const pageCanvas = document.createElement('canvas');
     pageCanvas.width = canvas.width;
     pageCanvas.height = sliceHeight;
@@ -332,6 +428,70 @@ async function downloadPdf(canvas: HTMLCanvasElement, fileName: string) {
   }
 
   pdf.save(fileName);
+}
+
+function findPdfPageSliceHeight(
+  canvas: HTMLCanvasElement,
+  sourceY: number,
+  idealSliceHeight: number,
+  canvasContext: CanvasRenderingContext2D | null,
+): number {
+  const remainingHeight = canvas.height - sourceY;
+  const maxSliceHeight = Math.min(idealSliceHeight, remainingHeight);
+  if (!canvasContext || remainingHeight <= idealSliceHeight) {
+    return maxSliceHeight;
+  }
+
+  const minSliceHeight = Math.max(1, Math.floor(idealSliceHeight * PDF_MIN_PAGE_SLICE_RATIO));
+  const searchTop = sourceY + Math.max(minSliceHeight, maxSliceHeight - PDF_PAGE_BREAK_SEARCH_PX);
+  const searchBottom = sourceY + maxSliceHeight;
+  let bestY = searchBottom;
+  let bestScore = Number.POSITIVE_INFINITY;
+
+  try {
+    for (let y = searchBottom; y >= searchTop; y -= PDF_PAGE_BREAK_SAMPLE_STEP) {
+      const score = scorePdfPageBreak(canvasContext, canvas.width, canvas.height, y);
+      if (score < bestScore) {
+        bestScore = score;
+        bestY = y;
+        if (score === 0) break;
+      }
+    }
+  } catch {
+    return maxSliceHeight;
+  }
+
+  return Math.max(1, Math.min(maxSliceHeight, bestY - sourceY));
+}
+
+function scorePdfPageBreak(
+  context: CanvasRenderingContext2D,
+  canvasWidth: number,
+  canvasHeight: number,
+  y: number,
+): number {
+  const bandTop = Math.max(0, Math.floor(y - PDF_PAGE_BREAK_BAND_PX / 2));
+  const bandHeight = Math.max(1, Math.min(PDF_PAGE_BREAK_BAND_PX, canvasHeight - bandTop));
+  const imageData = context.getImageData(0, bandTop, canvasWidth, bandHeight).data;
+  let score = 0;
+
+  for (let row = 0; row < bandHeight; row += 2) {
+    for (let x = 0; x < canvasWidth; x += PDF_PAGE_BREAK_SAMPLE_STEP) {
+      const index = (row * canvasWidth + x) * 4;
+      const alpha = imageData[index + 3];
+      if (alpha < 12) continue;
+
+      const red = imageData[index];
+      const green = imageData[index + 1];
+      const blue = imageData[index + 2];
+      const luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+      if (luminance < 235) {
+        score += 1;
+      }
+    }
+  }
+
+  return score;
 }
 
 function downloadDataUrl(dataUrl: string, fileName: string) {
