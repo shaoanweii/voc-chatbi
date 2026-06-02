@@ -1,8 +1,8 @@
 'use client';
 
-import { useRef, useState } from 'react';
-import type { ReactNode } from 'react';
-import type { SmartReport, SmartReportAnalysisGroup, SmartReportChart, SmartReportTable } from '@/lib/types';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { ComponentType, ReactNode } from 'react';
+import type { ReportChartType, SmartReport, SmartReportAnalysisGroup, SmartReportChart, SmartReportTable } from '@/lib/types';
 import {
   Bar,
   BarChart,
@@ -18,12 +18,16 @@ import {
   YAxis,
 } from 'recharts';
 import {
-  BarChart3,
+  BarChart3 as BarChart3Icon,
+  BarChartHorizontal,
+  CircleDot,
   FileDown,
   FileImage,
   Lightbulb,
+  LineChart as LineChartIcon,
   Loader2,
   MoreHorizontal,
+  PieChart as PieChartIcon,
 } from 'lucide-react';
 import {
   DropdownMenu,
@@ -50,9 +54,24 @@ function renderBoldText(text: string): ReactNode {
 
 const CHART_COLORS = ['#0ea5e9', '#06b6d4', '#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#84cc16'];
 type ExportFormat = 'png' | 'pdf';
+type ReportChartDisplayType = Exclude<ReportChartType, 'table'> | 'horizontalBar';
 interface RenderReportCanvasOptions {
   pixelRatio: number;
 }
+
+interface ChartTypeOption {
+  type: ReportChartDisplayType;
+  label: string;
+}
+
+const reportChartTypeIcons = {
+  bar: BarChart3Icon,
+  horizontalBar: BarChartHorizontal,
+  line: LineChartIcon,
+  pie: PieChartIcon,
+  donut: CircleDot,
+  stackedBar: BarChart3Icon,
+} satisfies Record<ReportChartDisplayType, ComponentType<{ className?: string }>>;
 
 const EXPORT_SAFE_PADDING = 48;
 const PDF_MIN_PAGE_SLICE_RATIO = 0.68;
@@ -689,7 +708,34 @@ function truncateAxisLabel(label: string, maxLen = 6): string {
   return `${label.slice(0, maxLen)}..`;
 }
 
+function normalizeReportDisplayType(type: ReportChartType): ReportChartDisplayType {
+  if (type === 'table') return 'bar';
+  return type;
+}
+
+function getReportChartTypeOptions(chart: SmartReportChart): ChartTypeOption[] {
+  if (chart.type === 'stackedBar') return [{ type: 'stackedBar', label: '堆叠柱' }];
+
+  return [
+    { type: 'bar', label: '竖柱' },
+    { type: 'horizontalBar', label: '横柱' },
+    { type: 'line', label: '折线' },
+    { type: 'pie', label: '饼图' },
+    { type: 'donut', label: '环图' },
+  ];
+}
+
 function ReportChartCard({ chart, order }: { chart: SmartReportChart; order?: string }) {
+  const availableTypes = useMemo(() => getReportChartTypeOptions(chart), [chart]);
+  const initialType = normalizeReportDisplayType(chart.type);
+  const [displayType, setDisplayType] = useState<ReportChartDisplayType>(
+    availableTypes.some((option) => option.type === initialType) ? initialType : availableTypes[0]?.type || 'bar'
+  );
+
+  useEffect(() => {
+    setDisplayType(availableTypes.some((option) => option.type === initialType) ? initialType : availableTypes[0]?.type || 'bar');
+  }, [availableTypes, initialType]);
+
   const dimension = chart.dimension;
   const measure = chart.measures[0] || '数量';
   const renderAxisTick = ({ x, y, payload }: { x: number; y: number; payload: { value: string } }) => (
@@ -700,15 +746,39 @@ function ReportChartCard({ chart, order }: { chart: SmartReportChart; order?: st
 
   return (
     <div className="rounded-[22px] border border-white/65 bg-white/54 p-5 shadow-[0_18px_48px_rgba(15,23,42,0.06)] backdrop-blur-xl">
-      <div className="mb-4 flex items-start justify-between gap-3">
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
         <div>
-          <SectionTitle order={order || ''} title={buildChartSectionTitle(chart)} icon={<BarChart3 className="h-4 w-4 text-blue-500" />} />
+          <SectionTitle order={order || ''} title={buildChartSectionTitle(chart)} icon={<BarChart3Icon className="h-4 w-4 text-blue-500" />} />
           {chart.subtitle && <div className="mt-1 text-xs text-[#009999]">{chart.subtitle}</div>}
         </div>
+        {availableTypes.length > 1 && (
+          <div className="flex shrink-0 items-center gap-1 rounded-full border border-white/70 bg-white/80 p-1 shadow-sm">
+            {availableTypes.map((option) => {
+              const Icon = reportChartTypeIcons[option.type];
+              return (
+                <button
+                  key={option.type}
+                  type="button"
+                  onClick={() => setDisplayType(option.type)}
+                  className={`grid h-8 w-8 place-items-center rounded-full transition ${
+                    displayType === option.type
+                      ? 'bg-[#0066CC] text-white shadow-[0_8px_18px_rgba(0,102,204,0.18)]'
+                      : 'text-[#009999] hover:bg-white hover:text-[#333333]'
+                  }`}
+                  aria-label={`切换为${option.label}`}
+                  aria-pressed={displayType === option.type}
+                  title={`切换为${option.label}`}
+                >
+                  <Icon className="h-4 w-4" />
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
-      <div className={chart.type === 'pie' || chart.type === 'donut' ? '' : 'h-[280px] w-full'}>
-        {chart.type === 'line' ? (
+      <div className={displayType === 'pie' || displayType === 'donut' || displayType === 'horizontalBar' ? '' : 'h-[280px] w-full'}>
+        {displayType === 'line' ? (
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={chart.data}>
               <CartesianGrid strokeDasharray="3 3" stroke="#e6edf4" vertical={false} />
@@ -718,7 +788,31 @@ function ReportChartCard({ chart, order }: { chart: SmartReportChart; order?: st
               <Line type="monotone" dataKey={measure} stroke="#6366f1" strokeWidth={2.5} dot={{ fill: '#64cfa6', r: 4, strokeWidth: 0 }} />
             </LineChart>
           </ResponsiveContainer>
-        ) : chart.type === 'pie' || chart.type === 'donut' ? (
+        ) : displayType === 'horizontalBar' ? (
+          <div style={{ width: '100%', height: Math.max(280, chart.data.length * 34) }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={chart.data} layout="vertical" margin={{ top: 8, right: 18, bottom: 8, left: 18 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e6edf4" horizontal={false} />
+                <XAxis type="number" tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} tickLine={false} />
+                <YAxis
+                  type="category"
+                  dataKey={dimension}
+                  width={94}
+                  tick={{ fill: '#64748b', fontSize: 12 }}
+                  axisLine={false}
+                  tickLine={false}
+                  tickFormatter={(value) => (String(value).length > 8 ? `${String(value).slice(0, 8)}..` : String(value))}
+                />
+                <Tooltip />
+                <Bar dataKey={measure} radius={[0, 8, 8, 0]}>
+                  {chart.data.map((_entry, index) => (
+                    <Cell key={`${chart.id}-${index}`} fill={CHART_COLORS[index % CHART_COLORS.length]} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        ) : displayType === 'pie' || displayType === 'donut' ? (
           <div>
             <ResponsiveContainer width="100%" height={280}>
               <PieChart>
@@ -738,7 +832,7 @@ function ReportChartCard({ chart, order }: { chart: SmartReportChart; order?: st
                   dataKey={measure}
                   cx="50%"
                   cy="50%"
-                  innerRadius={chart.type === 'donut' ? 60 : 0}
+                  innerRadius={displayType === 'donut' ? 60 : 0}
                   outerRadius={92}
                   stroke="none"
                   label={({ name, value, percent }) => `${String(name).length > 6 ? `${String(name).slice(0, 6)}..` : String(name)} ${Number(value).toLocaleString()}（${(percent * 100).toFixed(1)}%）`}

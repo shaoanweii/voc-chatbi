@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import type { Message } from '@/lib/types';
+import type { ChartData, Message, SmartReport } from '@/lib/types';
 import { HomeView } from '@/components/home-view';
 import { ChatView } from '@/components/chat-view';
 import type { SmartTableSelection } from '@/components/table-picker-dialog';
@@ -118,7 +118,7 @@ export default function VocChatLayout({ children }: { children: React.ReactNode 
       try {
         const history = messages.map((m) => ({
           role: m.role,
-          content: m.content,
+          content: buildHistoryContent(m),
         }));
 
         const response = await fetch('/api/chat', {
@@ -422,6 +422,84 @@ export default function VocChatLayout({ children }: { children: React.ReactNode 
 function buildSessionTitle(query: string) {
   const compact = query.trim().replace(/\s+/g, ' ');
   return compact.length > 40 ? `${compact.slice(0, 40)}...` : compact || '新对话';
+}
+
+function buildHistoryContent(message: Message): string {
+  if (message.role === 'user') return message.content;
+
+  const parts = [
+    message.content ? `上一轮回答：\n${message.content}` : '',
+    message.sql ? `上一轮 SQL：\n${compactText(message.sql, 900)}` : '',
+    message.chart ? buildChartHistorySummary(message.chart) : '',
+    message.report ? buildReportHistorySummary(message.report) : '',
+  ].filter(Boolean);
+
+  return parts.join('\n\n') || message.content;
+}
+
+function buildChartHistorySummary(chart: ChartData): string {
+  const topData = chart.data
+    .slice(0, 8)
+    .map((item) => {
+      const extraEntries = Object.entries(item)
+        .filter(([key]) => key !== 'name' && key !== 'value' && key !== 'color')
+        .slice(0, 3)
+        .map(([key, value]) => `${key}=${value}`);
+      return [item.name, `value=${item.value}`, ...extraEntries].join('，');
+    });
+
+  return [
+    '上一轮图表结果：',
+    `标题：${chart.title || '未命名图表'}`,
+    `类型：${chart.type}`,
+    chart.subtitle ? `说明：${chart.subtitle}` : '',
+    topData.length > 0 ? `Top 数据：${topData.join('；')}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function buildReportHistorySummary(report: SmartReport): string {
+  const metricSummary = report.metrics
+    .slice(0, 4)
+    .map((metric) => `${metric.label}=${metric.value}`)
+    .join('；');
+  const chartSummary = report.charts
+    .slice(0, 4)
+    .map((chart) => {
+      const measure = chart.measures[0] || '数量';
+      const topRows = chart.data
+        .slice(0, 3)
+        .map((row) => `${row[chart.dimension] ?? ''}:${row[measure] ?? ''}`)
+        .filter(Boolean)
+        .join('、');
+      return `${chart.title}（${chart.type}，${chart.dimension}，${topRows}）`;
+    })
+    .join('；');
+  const explanationSummary = report.chartExplanations
+    .slice(0, 4)
+    .map((item) => `${item.title}：${compactText(item.explanation, 140)}`)
+    .join('；');
+  const finalGroups = report.finalSummary?.analysisGroups
+    ?.slice(0, 3)
+    .map((group) => `${group.title}：${group.points.slice(0, 2).join('；')}`)
+    .join('；');
+
+  return [
+    '上一轮报告结果：',
+    `标题：${report.title}`,
+    `样本量：${report.recordCount}`,
+    report.executiveSummary ? `全文摘要：${compactText(report.executiveSummary, 420)}` : '',
+    report.finalSummary?.summary ? `最终结论：${compactText(report.finalSummary.summary, 420)}` : '',
+    metricSummary ? `核心指标：${metricSummary}` : '',
+    chartSummary ? `图表摘要：${chartSummary}` : '',
+    explanationSummary ? `图表解读：${explanationSummary}` : '',
+    finalGroups ? `分析分组：${finalGroups}` : '',
+    report.recommendations.length > 0 ? `处理建议：${report.recommendations.slice(0, 3).join('；')}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function compactText(value: unknown, maxLength: number): string {
+  const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...[已截断]` : text;
 }
 
 async function createChatSession({

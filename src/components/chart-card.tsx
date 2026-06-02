@@ -1,6 +1,7 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import type { ComponentType } from 'react';
 import type { ChartData } from '@/lib/types';
 import {
   BarChart,
@@ -16,10 +17,43 @@ import {
   Line,
   Tooltip,
 } from 'recharts';
+import {
+  BarChart3 as BarChart3Icon,
+  BarChartHorizontal,
+  CircleDot,
+  LineChart as LineChartIcon,
+  PieChart as PieChartIcon,
+} from 'lucide-react';
 
 interface ChartCardProps {
   data: ChartData;
 }
+
+type ChartDisplayType = ChartData['type'] | 'horizontalBar';
+
+interface ChartTypeOption {
+  type: ChartDisplayType;
+  label: string;
+}
+
+interface PieLabelProps {
+  cx: number;
+  cy: number;
+  midAngle: number;
+  outerRadius: number;
+  percent: number;
+  name: string | number;
+  value: number;
+}
+
+const chartTypeIcons = {
+  bar: BarChart3Icon,
+  horizontalBar: BarChartHorizontal,
+  line: LineChartIcon,
+  pie: PieChartIcon,
+  donut: CircleDot,
+  stackedBar: BarChart3Icon,
+} satisfies Record<ChartDisplayType, ComponentType<{ className?: string }>>;
 
 const GRADIENT_COLORS = [
   { id: 'barMint', from: '#9adcc3', to: '#64cfa6' },
@@ -54,21 +88,37 @@ const SCROLL_THRESHOLD = 14; // 超过此数量的条目才启用横向滚动
 const MIN_ITEM_WIDTH_BAR = 48;
 const MIN_ITEM_WIDTH_LINE = 60;
 
-function needsHorizontalScroll(dataLength: number, chartType: string): boolean {
-  if (chartType === 'donut' || chartType === 'pie') return false;
+function needsHorizontalScroll(dataLength: number, chartType: ChartDisplayType): boolean {
+  if (chartType === 'donut' || chartType === 'pie' || chartType === 'horizontalBar') return false;
   return dataLength > SCROLL_THRESHOLD;
 }
 
-function calcChartWidth(dataLength: number, chartType: string): number {
-  if (chartType === 'donut' || chartType === 'pie') return 240;
+function calcChartWidth(dataLength: number, chartType: ChartDisplayType): number {
+  if (chartType === 'donut' || chartType === 'pie' || chartType === 'horizontalBar') return 240;
   const itemWidth = chartType === 'line' ? MIN_ITEM_WIDTH_LINE : MIN_ITEM_WIDTH_BAR;
   return dataLength * itemWidth;
+}
+
+function getAvailableChartTypes(data: ChartData): ChartTypeOption[] {
+  if (data.type === 'stackedBar') return [{ type: 'stackedBar', label: '堆叠柱' }];
+
+  return [
+    { type: 'bar', label: '竖柱' },
+    { type: 'horizontalBar', label: '横柱' },
+    { type: 'line', label: '折线' },
+    { type: 'pie', label: '饼图' },
+    { type: 'donut', label: '环图' },
+  ];
+}
+
+function normalizeInitialChartType(type: ChartData['type']): ChartDisplayType {
+  return type === 'stackedBar' ? 'stackedBar' : type;
 }
 
 const RADIAN = Math.PI / 180;
 
 /** 渲染饼图/环形图外部标签（含折线连接），百分比过小不显示，避免重叠 */
-function renderPieLabel(props: Record<string, any>) {
+function renderPieLabel(props: PieLabelProps) {
   const { cx, cy, midAngle, outerRadius, percent, name, value } = props;
 
   if (percent * 100 < 4) return null;
@@ -115,12 +165,20 @@ function renderPieLabel(props: Record<string, any>) {
 }
 
 export function ChartCard({ data }: ChartCardProps) {
+  const [displayType, setDisplayType] = useState<ChartDisplayType>(() => normalizeInitialChartType(data.type));
+  const availableTypes = useMemo(() => getAvailableChartTypes(data), [data]);
+
+  useEffect(() => {
+    const nextType = normalizeInitialChartType(data.type);
+    setDisplayType(availableTypes.some((option) => option.type === nextType) ? nextType : availableTypes[0]?.type || 'bar');
+  }, [availableTypes, data.type]);
+
   const chartWidth = useMemo(
-    () => calcChartWidth(data.data.length, data.type),
-    [data.data.length, data.type],
+    () => calcChartWidth(data.data.length, displayType),
+    [data.data.length, displayType],
   );
 
-  const needsScroll = needsHorizontalScroll(data.data.length, data.type);
+  const needsScroll = needsHorizontalScroll(data.data.length, displayType);
 
   const chartContent = (
     <>
@@ -135,7 +193,7 @@ export function ChartCard({ data }: ChartCardProps) {
         </defs>
       </svg>
 
-      {data.type === 'bar' && (
+      {displayType === 'bar' && (
         <div style={{ width: '100%', height: 280, minWidth: needsScroll ? chartWidth : undefined }}>
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={data.data} margin={{ bottom: 8 }} barCategoryGap="20%">
@@ -171,7 +229,42 @@ export function ChartCard({ data }: ChartCardProps) {
         </div>
       )}
 
-      {data.type === 'line' && (
+      {displayType === 'horizontalBar' && (
+        <div style={{ width: '100%', height: Math.max(280, data.data.length * 34) }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={data.data} layout="vertical" margin={{ top: 8, right: 18, bottom: 8, left: 18 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e6edf4" horizontal={false} />
+              <XAxis
+                type="number"
+                tick={{ fill: '#94a3b8', fontSize: 11 }}
+                axisLine={false}
+                tickLine={false}
+              />
+              <YAxis
+                type="category"
+                dataKey="name"
+                width={92}
+                tick={{ fill: '#64748b', fontSize: 12 }}
+                axisLine={false}
+                tickLine={false}
+                tickFormatter={(value) => (String(value).length > 8 ? `${String(value).slice(0, 8)}..` : String(value))}
+              />
+              <Tooltip
+                contentStyle={tooltipStyle}
+                cursor={tooltipCursorStyle}
+                formatter={(value: number) => [value.toLocaleString(), data.subtitle || '数量']}
+              />
+              <Bar dataKey="value" radius={[0, 8, 8, 0]}>
+                {data.data.map((_entry, index) => (
+                  <Cell key={`cell-${index}`} fill={getBarFill(index)} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      {displayType === 'line' && (
         <div style={{ width: '100%', height: 280, minWidth: needsScroll ? chartWidth : undefined }}>
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={data.data} margin={{ top: 8, right: 8, bottom: 8, left: 0 }}>
@@ -209,7 +302,7 @@ export function ChartCard({ data }: ChartCardProps) {
         </div>
       )}
 
-      {data.type === 'stackedBar' && (() => {
+      {displayType === 'stackedBar' && (() => {
         const stackKeys = data.series && data.series.length > 0
           ? data.series
           : (() => {
@@ -259,7 +352,7 @@ export function ChartCard({ data }: ChartCardProps) {
         );
       })()}
 
-      {data.type === 'donut' && (
+      {displayType === 'donut' && (
         <div className="flex flex-col items-center">
           <ResponsiveContainer width={480} height={340}>
             <PieChart margin={{ top: 10, right: 100, bottom: 10, left: 100 }}>
@@ -308,7 +401,7 @@ export function ChartCard({ data }: ChartCardProps) {
         </div>
       )}
 
-      {data.type === 'pie' && (
+      {displayType === 'pie' && (
         <div className="flex flex-col items-center">
           <ResponsiveContainer width={480} height={340}>
             <PieChart margin={{ top: 10, right: 100, bottom: 10, left: 100 }}>
@@ -362,8 +455,36 @@ export function ChartCard({ data }: ChartCardProps) {
 
   return (
     <div className="voc-chart-card p-5">
-      <h3 className="text-base font-extrabold text-slate-950 mb-1">{data.title}</h3>
-      <p className="text-xs text-slate-400 mb-4">{data.subtitle}</p>
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="text-base font-extrabold text-slate-950 mb-1">{data.title}</h3>
+          <p className="text-xs text-slate-400">{data.subtitle}</p>
+        </div>
+        {availableTypes.length > 1 && (
+          <div className="flex shrink-0 items-center gap-1 rounded-full border border-slate-200/80 bg-white/85 p-1 shadow-sm">
+            {availableTypes.map((option) => {
+              const Icon = chartTypeIcons[option.type];
+              return (
+                <button
+                  key={option.type}
+                  type="button"
+                  onClick={() => setDisplayType(option.type)}
+                  className={`grid h-8 w-8 place-items-center rounded-full transition ${
+                    displayType === option.type
+                      ? 'bg-[#0066CC] text-white shadow-[0_8px_18px_rgba(0,102,204,0.18)]'
+                      : 'text-slate-500 hover:bg-white hover:text-slate-800'
+                  }`}
+                  aria-label={`切换为${option.label}`}
+                  aria-pressed={displayType === option.type}
+                  title={`切换为${option.label}`}
+                >
+                  <Icon className="h-4 w-4" />
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
 
       {needsScroll ? (
         <div

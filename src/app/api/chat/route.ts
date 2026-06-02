@@ -29,7 +29,7 @@ const CONTEXT_WARNING_CHARS = 50_000;
 const MAX_HISTORY_MESSAGES = 20;
 /** 单条历史消息最大字符数（assistant 答复合更长，user 问题较短） */
 const MAX_HISTORY_USER_CHARS = 500;
-const MAX_HISTORY_ASSISTANT_CHARS = 1500;
+const MAX_HISTORY_ASSISTANT_CHARS = 3500;
 const DEFAULT_REPORT_SQL_LIMIT = 10000;
 const DEFAULT_REPORT_CHART_LIMIT = 10;
 const MAX_REPORT_CHART_LIMIT = 20;
@@ -435,7 +435,6 @@ export async function POST(request: NextRequest) {
   let contextWarning = false;
   try {
     const { query, isReasoning, history, smartTableIds, conversationId } = await request.json();
-    const reasoningEnabled = isReasoning !== false;
 
     if (!query || typeof query !== 'string') {
       return new Response(JSON.stringify({ error: 'query is required' }), {
@@ -479,6 +478,7 @@ export async function POST(request: NextRequest) {
 
     const tableContext = buildTableContextPrompt(tables);
     const historyMessages = buildHistoryMessages(history);
+    const reasoningEnabled = isReasoning === true || await shouldEnableReasoningForFollowUp(query, historyMessages);
     const plannerPrompt = [
       tableContext,
       `用户问题：${query}`,
@@ -967,7 +967,6 @@ function streamSmartReportResponse({
 
   const stream = new ReadableStream({
     async start(controller) {
-      let streamedContent = '';
       const send = (payload: Record<string, unknown>) => {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
       };
@@ -2494,9 +2493,11 @@ async function insertChatMessage({
   status?: 'success' | 'failure';
   errorMessage?: string;
 }): Promise<void> {
+  const chartPayload = metadata.chart && typeof metadata.chart === 'object' ? metadata.chart : null;
+
   await pgQuery(
-    `INSERT INTO chat_messages (session_id, role, content, thinking, sql_text, sources, metadata, status, error_message)
-     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9)`,
+    `INSERT INTO chat_messages (session_id, role, content, thinking, sql_text, sources, chart, metadata, status, error_message)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9, $10)`,
     [
       sessionId,
       role,
@@ -2504,6 +2505,7 @@ async function insertChatMessage({
       thinking || null,
       sqlText || null,
       JSON.stringify(sources),
+      chartPayload ? JSON.stringify(chartPayload) : null,
       JSON.stringify(metadata),
       status,
       errorMessage || null,
@@ -2582,6 +2584,43 @@ function buildHistoryMessages(history: unknown): DeepSeekMessage[] {
         : item.content;
       return { role: item.role as 'user' | 'assistant', content: truncated };
     });
+}
+
+async function shouldEnableReasoningForFollowUp(userQuery: string, historyMessages: DeepSeekMessage[]): Promise<boolean> {
+  if (historyMessages.length === 0) return false;
+
+  const recentHistory = historyMessages
+    .slice(-6)
+    .map((message) => `${message.role === 'user' ? '用户' : '助手'}：${compactText(message.content, 900)}`)
+    .join('\n\n');
+
+  try {
+    const { content } = await callDeepSeek(
+      [
+        {
+          role: 'system',
+          content: [
+            '你是多轮数据问答相关性分类器，只判断当前问题是否依赖上一轮或更早的输出结果。',
+            '如果当前问题引用了上一轮图表、报告、SQL、筛选条件、Top项、某个上一轮出现的车型/标签/维度，或使用“刚才、继续、基于、这个、上面、其中、它”等承接表达，返回 related=true。',
+            '如果当前问题是一个可独立回答的新查询，即使同属数据分析，也返回 related=false。',
+            '只输出 JSON：{"related":true|false,"reason":"简短原因"}',
+          ].join('\n'),
+        },
+        {
+          role: 'user',
+          content: [
+            `历史上下文：\n${recentHistory}`,
+            `当前问题：${userQuery}`,
+          ].join('\n\n'),
+        },
+      ],
+      { thinking: false, reasoningEffort: 'high', temperature: 0 }
+    );
+    const parsed = JSON.parse(extractJson(content)) as { related?: unknown };
+    return parsed.related === true;
+  } catch {
+    return false;
+  }
 }
 
 function estimateContextChars(messages: DeepSeekMessage[]): number {
