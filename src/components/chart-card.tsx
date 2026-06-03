@@ -126,10 +126,13 @@ function renderPieLabel(props: PieLabelProps) {
   const sin = Math.sin(-midAngle * RADIAN);
   const cos = Math.cos(-midAngle * RADIAN);
 
+  const nameStr = String(name);
+  // 标签越长，折线延伸越远，避免文字相互遮盖
+  const extraByLength = Math.min(nameStr.length * 3, 36);
   // 交错距离：根据角度周期性错开标签位置，避免相邻标签重叠
-  const stagger = Math.abs(Math.sin(midAngle * 3 * RADIAN)) * 18 + 14;
+  const stagger = Math.abs(Math.sin(midAngle * 3 * RADIAN)) * 18 + 18 + extraByLength;
 
-  const radius = outerRadius + 2;
+  const radius = outerRadius + 4;
   const sx = cx + radius * cos;
   const sy = cy + radius * sin;
   const mx = cx + (radius + stagger * 0.5) * cos;
@@ -138,7 +141,8 @@ function renderPieLabel(props: PieLabelProps) {
   const ey = my;
 
   const textAnchor = cos >= 0 ? 'start' : 'end';
-  const displayName = String(name).length > 6 ? `${String(name).slice(0, 6)}..` : String(name);
+  // 截断阈值放宽到 8 个字符，中文维度名通常 4-8 字
+  const displayName = nameStr.length > 8 ? `${nameStr.slice(0, 8)}..` : nameStr;
 
   return (
     <g>
@@ -354,44 +358,50 @@ export function ChartCard({ data }: ChartCardProps) {
 
       {displayType === 'donut' && (
         <div className="flex flex-col items-center">
-          <ResponsiveContainer width={480} height={340}>
-            <PieChart margin={{ top: 10, right: 100, bottom: 10, left: 100 }}>
-              <Tooltip
-                contentStyle={tooltipStyle}
-                formatter={(value: number, name: string) => {
-                  const total = data.data.reduce((sum, d) => sum + d.value, 0);
-                  const pct = total > 0 ? ((value / total) * 100).toFixed(1) : '0';
-                  return [`${value.toLocaleString()}（${pct}%）`, name || '数量'];
-                }}
-              />
-              <Pie
-                data={data.data}
-                cx="50%"
-                cy="50%"
-                innerRadius={50}
-                outerRadius={80}
-                dataKey="value"
-                nameKey="name"
-                stroke="none"
-                label={renderPieLabel}
-              >
-                {data.data.map((_entry, index) => (
-                  <Cell key={`cell-${index}`} fill={getSolidColor(index)} />
-                ))}
-              </Pie>
-            </PieChart>
-          </ResponsiveContainer>
+          {/* overflow-x: auto 保证窄容器时标签不被截断，minWidth 保底足够的标签空间 */}
+          <div className="w-full overflow-x-auto" style={{ WebkitOverflowScrolling: 'touch' as React.CSSProperties['WebkitOverflowScrolling'] }}>
+            <div style={{ minWidth: 480, width: '100%' }}>
+              <ResponsiveContainer width="100%" height={360}>
+                <PieChart margin={{ top: 16, right: 120, bottom: 16, left: 120 }}>
+                  <Tooltip
+                    contentStyle={tooltipStyle}
+                    formatter={(value: number, name: string) => {
+                      const total = data.data.reduce((sum, d) => sum + d.value, 0);
+                      const pct = total > 0 ? ((value / total) * 100).toFixed(1) : '0';
+                      return [`${value.toLocaleString()}（${pct}%）`, name || '数量'];
+                    }}
+                  />
+                  <Pie
+                    data={data.data}
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={54}
+                    outerRadius={88}
+                    dataKey="value"
+                    nameKey="name"
+                    stroke="none"
+                    label={renderPieLabel}
+                  >
+                    {data.data.map((_entry, index) => (
+                      <Cell key={`cell-${index}`} fill={getSolidColor(index)} />
+                    ))}
+                  </Pie>
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
           <div className="mt-3 flex flex-wrap justify-center gap-x-4 gap-y-1.5 text-xs text-slate-500">
             {data.data.map((entry, index) => {
               const total = data.data.reduce((sum, d) => sum + d.value, 0);
               const pct = total > 0 ? `（${((entry.value / total) * 100).toFixed(1)}%）` : '';
+              const nameStr = String(entry.name);
               return (
                 <div key={index} className="flex items-center gap-1">
                   <span
                     className="inline-block h-2.5 w-2.5 shrink-0 rounded-sm"
                     style={{ backgroundColor: getSolidColor(index) }}
                   />
-                  <span className="max-w-[100px] truncate">{String(entry.name).length > 6 ? `${String(entry.name).slice(0, 6)}..` : String(entry.name)}</span>
+                  <span className="max-w-[140px] truncate" title={nameStr}>{nameStr.length > 8 ? `${nameStr.slice(0, 8)}..` : nameStr}</span>
                   <span className="font-semibold text-slate-700">{entry.value.toLocaleString()}</span>
                   <span className="text-slate-400">{pct}</span>
                 </div>
@@ -403,45 +413,51 @@ export function ChartCard({ data }: ChartCardProps) {
 
       {displayType === 'pie' && (
         <div className="flex flex-col items-center">
-          <ResponsiveContainer width={480} height={340}>
-            <PieChart margin={{ top: 10, right: 100, bottom: 10, left: 100 }}>
-              <Tooltip
-                contentStyle={tooltipStyle}
-                formatter={(value: number, name: string) => {
-                  const total = data.data.reduce((sum, d) => sum + d.value, 0);
-                  const pct = total > 0 ? ((value / total) * 100).toFixed(1) : '0';
-                  return [`${value.toLocaleString()}（${pct}%）`, name || '数量'];
-                }}
-              />
-              <Pie
-                data={data.data}
-                cx="50%"
-                cy="50%"
-                innerRadius={0}
-                outerRadius={80}
-                dataKey="value"
-                nameKey="name"
-                stroke="#fff"
-                strokeWidth={2}
-                label={renderPieLabel}
-              >
-                {data.data.map((_entry, index) => (
-                  <Cell key={`cell-${index}`} fill={getSolidColor(index)} />
-                ))}
-              </Pie>
-            </PieChart>
-          </ResponsiveContainer>
+          {/* overflow-x: auto 保证窄容器时标签不被截断，minWidth 保底足够的标签空间 */}
+          <div className="w-full overflow-x-auto" style={{ WebkitOverflowScrolling: 'touch' as React.CSSProperties['WebkitOverflowScrolling'] }}>
+            <div style={{ minWidth: 480, width: '100%' }}>
+              <ResponsiveContainer width="100%" height={360}>
+                <PieChart margin={{ top: 16, right: 120, bottom: 16, left: 120 }}>
+                  <Tooltip
+                    contentStyle={tooltipStyle}
+                    formatter={(value: number, name: string) => {
+                      const total = data.data.reduce((sum, d) => sum + d.value, 0);
+                      const pct = total > 0 ? ((value / total) * 100).toFixed(1) : '0';
+                      return [`${value.toLocaleString()}（${pct}%）`, name || '数量'];
+                    }}
+                  />
+                  <Pie
+                    data={data.data}
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={0}
+                    outerRadius={88}
+                    dataKey="value"
+                    nameKey="name"
+                    stroke="#fff"
+                    strokeWidth={2}
+                    label={renderPieLabel}
+                  >
+                    {data.data.map((_entry, index) => (
+                      <Cell key={`cell-${index}`} fill={getSolidColor(index)} />
+                    ))}
+                  </Pie>
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
           <div className="mt-3 flex flex-wrap justify-center gap-x-4 gap-y-1.5 text-xs text-slate-500">
             {data.data.map((entry, index) => {
               const total = data.data.reduce((sum, d) => sum + d.value, 0);
               const pct = total > 0 ? `（${((entry.value / total) * 100).toFixed(1)}%）` : '';
+              const nameStr = String(entry.name);
               return (
                 <div key={index} className="flex items-center gap-1">
                   <span
                     className="inline-block h-2.5 w-2.5 shrink-0 rounded-sm"
                     style={{ backgroundColor: getSolidColor(index) }}
                   />
-                  <span className="max-w-[100px] truncate">{String(entry.name).length > 6 ? `${String(entry.name).slice(0, 6)}..` : String(entry.name)}</span>
+                  <span className="max-w-[140px] truncate" title={nameStr}>{nameStr.length > 8 ? `${nameStr.slice(0, 8)}..` : nameStr}</span>
                   <span className="font-semibold text-slate-700">{entry.value.toLocaleString()}</span>
                   <span className="text-slate-400">{pct}</span>
                 </div>

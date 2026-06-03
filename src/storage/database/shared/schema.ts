@@ -172,6 +172,79 @@ export const chatMessages = pgTable(
   ]
 );
 
+// 智能问数结构化产物
+export const chatArtifacts = pgTable(
+  "chat_artifacts",
+  {
+    id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+    session_id: varchar("session_id", { length: 36 }).notNull(),
+    message_id: varchar("message_id", { length: 36 }),
+    artifact_type: varchar("artifact_type", { length: 30 }).notNull(),
+    title: text("title"),
+    summary: text("summary"),
+    sql_text: text("sql_text"),
+    filters: jsonb("filters").notNull().default(sql`'{}'`),
+    dimensions: jsonb("dimensions").notNull().default(sql`'[]'`),
+    measures: jsonb("measures").notNull().default(sql`'[]'`),
+    data: jsonb("data"),
+    metadata: jsonb("metadata").notNull().default(sql`'{}'`),
+    created_at: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("chat_artifacts_session_idx").on(table.session_id),
+    index("chat_artifacts_message_idx").on(table.message_id),
+    index("chat_artifacts_type_idx").on(table.artifact_type),
+    index("chat_artifacts_session_created_at_idx").on(table.session_id, table.created_at),
+  ]
+);
+
+// 知识中心语料：业务概念、字段映射、指标口径、场景规则和语料案例
+export const knowledgeItems = pgTable(
+  "knowledge_items",
+  {
+    id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+    title: varchar("title", { length: 160 }).notNull(),
+    category: varchar("category", { length: 32 }).notNull(),
+    standard_term: varchar("standard_term", { length: 120 }),
+    aliases: jsonb("aliases").notNull().default(sql`'[]'`),
+    keywords: jsonb("keywords").notNull().default(sql`'[]'`),
+    content: text("content").notNull(),
+    field_name: varchar("field_name", { length: 120 }),
+    formula: text("formula"),
+    business_domain: varchar("business_domain", { length: 80 }).default("汽车VOC"),
+    applicable_intents: jsonb("applicable_intents").notNull().default(sql`'[]'`),
+    metadata: jsonb("metadata").notNull().default(sql`'{}'`),
+    priority: integer("priority").notNull().default(50),
+    status: varchar("status", { length: 20 }).notNull().default("active"),
+    created_at: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updated_at: timestamp("updated_at", { withTimezone: true }),
+  },
+  (table) => [
+    index("knowledge_items_category_idx").on(table.category),
+    index("knowledge_items_status_idx").on(table.status),
+    index("knowledge_items_priority_idx").on(table.priority),
+    index("knowledge_items_standard_term_idx").on(table.standard_term),
+  ]
+);
+
+// 知识中心倒排关键词索引：用于聊天前置快速检索候选语料
+export const knowledgeItemTerms = pgTable(
+  "knowledge_item_terms",
+  {
+    id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+    item_id: varchar("item_id", { length: 36 }).notNull(),
+    term: varchar("term", { length: 160 }).notNull(),
+    normalized_term: varchar("normalized_term", { length: 160 }).notNull(),
+    term_type: varchar("term_type", { length: 32 }).notNull(),
+    weight: integer("weight").notNull().default(1),
+    created_at: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("knowledge_item_terms_normalized_idx").on(table.normalized_term),
+    index("knowledge_item_terms_item_idx").on(table.item_id),
+  ]
+);
+
 // 审计事件表
 export const auditEvents = pgTable(
   "audit_events",

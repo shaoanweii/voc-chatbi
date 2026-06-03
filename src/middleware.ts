@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-const pageRoutes = ['/', '/chatbi', '/data-prep', '/voc_data_report'];
-const apiRoutes = ['/api/chat', '/api/users', '/api/audit'];
+const pageRoutes = ['/', '/chatbi', '/data-prep', '/voc_data_report', '/knowledge-center'];
+const apiRoutes = ['/api/chat', '/api/users', '/api/audit', '/api/knowledge'];
 const publicApiPrefixes = ['/api/auth', '/api/logout'];
 const publicPaths = ['/login'];
 const routeAliases = [
@@ -76,9 +76,11 @@ export const config = {
     '/data-prep/:path*',
     '/data-pere/:path*',
     '/voc_data_report/:path*',
+    '/knowledge-center/:path*',
     '/api/chat/:path*',
     '/api/users/:path*',
     '/api/audit/:path*',
+    '/api/knowledge/:path*',
     '/api/auth/:path*',
     '/api/logout/:path*',
     '/login/:path*',

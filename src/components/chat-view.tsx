@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import { toast } from 'sonner';
 import type { Message } from '@/lib/types';
 import { FOLLOW_UP_VARIANTS } from '@/lib/types';
 import {
@@ -207,7 +208,18 @@ export function ChatView({
   const handleShareSession = async () => {
     if (!sessionId) return;
     const url = `${window.location.origin}/chatbi/${sessionId}`;
-    await navigator.clipboard?.writeText(url);
+    try {
+      await navigator.clipboard?.writeText(url);
+      toast('分享链接已复制 ✓', {
+        description: url,
+        duration: 3000,
+      });
+    } catch {
+      toast.error('复制失败，请手动复制链接', {
+        description: url,
+        duration: 5000,
+      });
+    }
   };
 
   const openTablePreview = async (table: SmartTableSelection) => {
@@ -365,7 +377,10 @@ export function ChatView({
           </Tooltip>
           <Tooltip>
             <TooltipTrigger asChild>
-              <button className="w-10 h-10 rounded-full bg-white/50 flex items-center justify-center text-slate-500 backdrop-blur-sm hover:bg-white/80 transition-all">
+              <button
+                onClick={() => router.push('/knowledge-center')}
+                className="w-10 h-10 rounded-full bg-white/50 flex items-center justify-center text-slate-500 backdrop-blur-sm hover:bg-white/80 transition-all"
+              >
                 <BookOpen className="w-4 h-4" />
               </button>
             </TooltipTrigger>

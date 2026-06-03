@@ -317,7 +317,7 @@ export default function VocDataReportPage() {
               </Tooltip>
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <button className="w-10 h-10 rounded-full bg-white/50 flex items-center justify-center text-slate-500 backdrop-blur-sm hover:bg-white/80 transition-all">
+                  <button onClick={() => router.push('/knowledge-center')} className="w-10 h-10 rounded-full bg-white/50 flex items-center justify-center text-slate-500 backdrop-blur-sm hover:bg-white/80 transition-all">
                     <BookOpen className="w-4 h-4" />
                   </button>
                 </TooltipTrigger>

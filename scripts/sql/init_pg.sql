@@ -358,6 +358,87 @@ CREATE INDEX IF NOT EXISTS chat_messages_created_at_idx ON chat_messages(created
 CREATE INDEX IF NOT EXISTS chat_messages_session_created_at_idx ON chat_messages(session_id, created_at);
 CREATE INDEX IF NOT EXISTS chat_messages_status_idx ON chat_messages(status);
 
+-- ========= 智能问数结构化产物表 =========
+-- 用于保存新对话生成的 SQL、图表、报告等结构化结果，支撑多轮追问上下文管理
+
+CREATE TABLE IF NOT EXISTS chat_artifacts (
+  id VARCHAR(36) PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  session_id VARCHAR(36) NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+  message_id VARCHAR(36) REFERENCES chat_messages(id) ON DELETE CASCADE,
+  artifact_type VARCHAR(30) NOT NULL,
+  title TEXT,
+  summary TEXT,
+  sql_text TEXT,
+  filters JSONB NOT NULL DEFAULT '{}'::jsonb,
+  dimensions JSONB NOT NULL DEFAULT '[]'::jsonb,
+  measures JSONB NOT NULL DEFAULT '[]'::jsonb,
+  data JSONB,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS chat_artifacts_session_idx ON chat_artifacts(session_id);
+CREATE INDEX IF NOT EXISTS chat_artifacts_message_idx ON chat_artifacts(message_id);
+CREATE INDEX IF NOT EXISTS chat_artifacts_type_idx ON chat_artifacts(artifact_type);
+CREATE INDEX IF NOT EXISTS chat_artifacts_session_created_at_idx ON chat_artifacts(session_id, created_at DESC);
+
+-- ========= 知识中心语料 =========
+-- 用于维护汽车 VOC 业务概念、字段映射、指标口径、场景规则和语料案例。
+
+CREATE TABLE IF NOT EXISTS knowledge_items (
+  id VARCHAR(36) PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  title VARCHAR(160) NOT NULL,
+  category VARCHAR(32) NOT NULL,
+  standard_term VARCHAR(120),
+  aliases JSONB NOT NULL DEFAULT '[]'::jsonb,
+  keywords JSONB NOT NULL DEFAULT '[]'::jsonb,
+  content TEXT NOT NULL,
+  field_name VARCHAR(120),
+  formula TEXT,
+  business_domain VARCHAR(80) DEFAULT '汽车VOC',
+  applicable_intents JSONB NOT NULL DEFAULT '[]'::jsonb,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  priority INTEGER NOT NULL DEFAULT 50,
+  status VARCHAR(20) NOT NULL DEFAULT 'active',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ,
+
+  CONSTRAINT knowledge_items_category_check
+    CHECK (category IN ('concept', 'synonym', 'field_mapping', 'metric', 'scenario', 'example', 'rule')),
+  CONSTRAINT knowledge_items_status_check
+    CHECK (status IN ('active', 'inactive'))
+);
+
+CREATE INDEX IF NOT EXISTS knowledge_items_category_idx ON knowledge_items(category);
+CREATE INDEX IF NOT EXISTS knowledge_items_status_idx ON knowledge_items(status);
+CREATE INDEX IF NOT EXISTS knowledge_items_priority_idx ON knowledge_items(priority DESC);
+CREATE INDEX IF NOT EXISTS knowledge_items_standard_term_idx ON knowledge_items(standard_term);
+CREATE UNIQUE INDEX IF NOT EXISTS knowledge_items_category_title_uidx ON knowledge_items(category, title);
+
+DROP TRIGGER IF EXISTS knowledge_items_set_updated_at ON knowledge_items;
+CREATE TRIGGER knowledge_items_set_updated_at
+BEFORE UPDATE ON knowledge_items
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS knowledge_item_terms (
+  id VARCHAR(36) PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  item_id VARCHAR(36) NOT NULL REFERENCES knowledge_items(id) ON DELETE CASCADE,
+  term VARCHAR(160) NOT NULL,
+  normalized_term VARCHAR(160) NOT NULL,
+  term_type VARCHAR(32) NOT NULL,
+  weight INTEGER NOT NULL DEFAULT 1,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  CONSTRAINT knowledge_item_terms_type_check
+    CHECK (term_type IN ('title', 'standard_term', 'alias', 'keyword', 'field', 'formula'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS knowledge_item_terms_item_term_type_uidx
+  ON knowledge_item_terms(item_id, normalized_term, term_type);
+CREATE INDEX IF NOT EXISTS knowledge_item_terms_normalized_idx ON knowledge_item_terms(normalized_term);
+CREATE INDEX IF NOT EXISTS knowledge_item_terms_item_idx ON knowledge_item_terms(item_id);
+
 -- ========= 审计事件表 =========
 -- 用于记录每次问答的审计信息，支撑数据报表页面
 

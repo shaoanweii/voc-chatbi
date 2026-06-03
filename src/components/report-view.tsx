@@ -8,6 +8,7 @@ import {
   BarChart,
   CartesianGrid,
   Cell,
+  Legend,
   Line,
   LineChart,
   Pie,
@@ -554,7 +555,10 @@ function buildFallbackChartExplanation(chart: SmartReportChart): string {
   const measure = chart.measures[0] || '数量';
   const top = chart.data[0];
   if (!top) return `${chart.title}暂无可解读的数据点。`;
-  return `${chart.title}显示「${String(top[chart.dimension] || '')}」最高，对应 ${Number(top[measure] || 0)} 条，建议优先围绕该维度继续抽样核查。`;
+  const topValue = chart.type === 'stackedBar'
+    ? chart.measures.reduce((sum, item) => sum + Number(top[item] || 0), 0)
+    : Number(top[measure] || 0);
+  return `${chart.title}显示「${String(top[chart.dimension] || '')}」最高，对应 ${topValue} 条，建议优先围绕该维度继续抽样核查。`;
 }
 
 function readRecordCountMetric(report: SmartReport): number {
@@ -708,6 +712,11 @@ function truncateAxisLabel(label: string, maxLen = 6): string {
   return `${label.slice(0, maxLen)}..`;
 }
 
+function formatChartNumber(value: unknown): string {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric.toLocaleString() : String(value ?? '');
+}
+
 function normalizeReportDisplayType(type: ReportChartType): ReportChartDisplayType {
   if (type === 'table') return 'bar';
   return type;
@@ -738,6 +747,8 @@ function ReportChartCard({ chart, order }: { chart: SmartReportChart; order?: st
 
   const dimension = chart.dimension;
   const measure = chart.measures[0] || '数量';
+  const stackedMeasures = chart.measures.filter((item) => item && item !== '总计' && item !== '占比');
+  const stackedSeries = stackedMeasures.length > 0 ? stackedMeasures : [measure];
   const renderAxisTick = ({ x, y, payload }: { x: number; y: number; payload: { value: string } }) => (
     <text x={x} y={y} dy={16} textAnchor="middle" fill="#64748b" fontSize={12}>
       {truncateAxisLabel(payload.value)}
@@ -787,6 +798,25 @@ function ReportChartCard({ chart, order }: { chart: SmartReportChart; order?: st
               <Tooltip />
               <Line type="monotone" dataKey={measure} stroke="#6366f1" strokeWidth={2.5} dot={{ fill: '#64cfa6', r: 4, strokeWidth: 0 }} />
             </LineChart>
+          </ResponsiveContainer>
+        ) : displayType === 'stackedBar' ? (
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={chart.data} margin={{ top: 8, right: 18, bottom: 8, left: 4 }} maxBarSize={80}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e6edf4" vertical={false} />
+              <XAxis dataKey={dimension} tick={renderAxisTick} axisLine={false} tickLine={false} interval={0} />
+              <YAxis tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} tickLine={false} width={44} />
+              <Tooltip formatter={(value: unknown, name: unknown) => [formatChartNumber(value), String(name)]} />
+              <Legend wrapperStyle={{ color: '#64748b', fontSize: 12, paddingTop: 8 }} />
+              {stackedSeries.map((seriesName, index) => (
+                <Bar
+                  key={`${chart.id}-${seriesName}`}
+                  dataKey={seriesName}
+                  stackId="comparison"
+                  fill={CHART_COLORS[index % CHART_COLORS.length]}
+                  radius={index === stackedSeries.length - 1 ? [8, 8, 0, 0] : [0, 0, 0, 0]}
+                />
+              ))}
+            </BarChart>
           </ResponsiveContainer>
         ) : displayType === 'horizontalBar' ? (
           <div style={{ width: '100%', height: Math.max(280, chart.data.length * 34) }}>

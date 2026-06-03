@@ -5,6 +5,7 @@ import path from 'node:path';
 import { NextRequest } from 'next/server';
 import type { PoolClient, QueryResultRow } from 'pg';
 import type {
+  ChartData,
   ReportChartType,
   SmartReport,
   SmartReportAnalysisGroup,
@@ -27,12 +28,15 @@ const MAX_CONTEXT_CHARS = 100_000;
 const CONTEXT_WARNING_CHARS = 50_000;
 /** 历史消息最大保留条数（10 轮对话） */
 const MAX_HISTORY_MESSAGES = 20;
+const MAX_CONTEXT_ARTIFACTS = 6;
 /** 单条历史消息最大字符数（assistant 答复合更长，user 问题较短） */
 const MAX_HISTORY_USER_CHARS = 500;
 const MAX_HISTORY_ASSISTANT_CHARS = 3500;
 const DEFAULT_REPORT_SQL_LIMIT = 10000;
 const DEFAULT_REPORT_CHART_LIMIT = 10;
 const MAX_REPORT_CHART_LIMIT = 20;
+const MAX_KNOWLEDGE_CANDIDATES = 60;
+const MAX_RELEVANT_KNOWLEDGE = 6;
 const DEFAULT_REPORT_DATE_RANGE = getDefaultReportDateRange();
 
 const PLANNER_SYSTEM_PROMPT = `你是「VOC 智能问数」的 SQL 规划器。
@@ -48,6 +52,8 @@ const PLANNER_SYSTEM_PROMPT = `你是「VOC 智能问数」的 SQL 规划器。
 6. SQL 中日期间字段：按年用 TO_CHAR(字段, 'YYYY-') AS year；按月用 TO_CHAR(字段, 'YYYY-MM') AS month；按天用 TO_CHAR(字段, 'MM-DD') AS day。
 7. 如果用户未指定时间范围，默认按过去一年过滤：${DEFAULT_REPORT_DATE_RANGE.start} 到 ${DEFAULT_REPORT_DATE_RANGE.end}。如果用户明确说了时间（如"上个月"、"最近三个月"），则按用户指定的来。
 8. simple_query 和 chart 意图的 SQL 必须显式包含 LIMIT ${DEFAULT_REPORT_SQL_LIMIT}；如果用户指定了更小的 TopN/limit，则使用用户指定值。
+9. 表上下文中的前 10 行样例和字段值示例只用于理解字段含义，不代表全量数据值域。禁止因为样例里没有出现某个车系、车型、标签、渠道或意图值，就判断该值“不存在”。用户给出具体业务值时，应生成 SQL 去验证和筛选；只有 SQL 执行结果为空时，才能说明未查询到数据。
+10. 用户要求“报告、竞品分析、围绕多个维度、词云、分布”等综合分析时，即使样例中没有出现用户点名的车系/车型，也应优先归类为 report 并生成查询计划，不要直接 clarify。
 
 === 意图识别基础原则 ===
 基于用户输入的自然语言，判断需要返回数据样例对应的意图。
@@ -217,6 +223,10 @@ const REPORT_PLANNER_SYSTEM_PROMPT = `你是「VOC 智能问数」的智能报�
 8. SQL 必须显式包含 LIMIT ${DEFAULT_REPORT_SQL_LIMIT}，如果用户指定了更小的 TopN/limit，则使用用户指定值。
 9. 图表类型由你根据字段类型、数据形态和业务表达目标选择，参考经验：标签构成可以用 pie 实心饼图，车型/车系排行可以用 bar 柱状图，时间维度趋势适合用 line 折线图，多列明细数据适合用 table。
 10. 分布/排行类图表默认 limit 必须为 ${DEFAULT_REPORT_CHART_LIMIT}；只有用户明确写出 topN、Top N、前N、前 N 名等数量时，图表 limit 才使用用户指定值，禁止默认输出 Top20。
+11. 前 10 行样例和字段值示例不是全量值域。禁止因为样例中没有出现某个车系、车型、标签、渠道或意图值，就判断该值不存在；应在 SQL 中按用户点名值筛选或用 ILIKE/IN 做候选匹配，执行后再根据结果判断。
+12. 用户点名多个车系/车型做竞品分析时，必须保留这些点名对象作为筛选条件或分组条件，不能因为样例未覆盖而要求用户重新指定。
+13. 用户点名多个车系/车型进行竞品分析，并要求围绕同一维度（如五级标签、三级渠道、意图、月份）对比时，禁止为每个车系/车型分别生成两张相同类型图表；必须生成一张 stackedBar 多系列对比图。dimension 使用被分析维度（如五级标签/三级渠道），seriesField 使用车系/车型字段，series 填用户点名对象（如 ["车系A", "车系B"]）。
+14. 多车系/车型对比 SQL 必须保留 seriesField 和 dimension 两类字段；可返回原始明细让系统聚合，也可 GROUP BY seriesField + dimension 并输出数量。不要只按单个车系拆成多段独立图表。
 
 只输出 JSON，不要 Markdown，不要解释。JSON 格式：
 {
@@ -231,6 +241,7 @@ const REPORT_PLANNER_SYSTEM_PROMPT = `你是「VOC 智能问数」的智能报�
   "rootCause": { "field": "原声片段", "keywords": ["启动机", "蓄电池"] },
   "charts": [
     { "id": "model_distribution", "title": "车型分布", "type": "bar", "dimension": "车型", "measure": "数量", "limit": 10 },
+    { "id": "tag_competitor_compare", "title": "车系五级标签对比", "type": "stackedBar", "dimension": "五级标签", "seriesField": "车系", "series": ["车系A", "车系B"], "measure": "数量", "limit": 10 },
     { "id": "tag_distribution", "title": "四级标签分布", "type": "pie", "dimension": "通用四级标签", "measure": "数量", "limit": 10 }
   ],
   "narrativeFocus": ["问题规模", "根因排序", "车型集中度", "改进建议"]
@@ -301,11 +312,13 @@ const PYTHON_ANALYST_SYSTEM_PROMPT = `你是「VOC 智能问数」的 Python pan
 5. 输出 JSON 必须包含 metrics、charts、tables、rootCauses 四个字段。
 6. charts 里的每个对象必须是：
    { "id": "...", "title": "...", "subtitle": "...", "type": "bar|pie|donut|line|stackedBar", "dimension": "...", "measures": ["数量"], "data": [{ "<dimension>": "...", "数量": 1, "占比": 10.0 }] }
+   stackedBar 必须用 measures 表达多系列，例如 "measures": ["车系A", "车系B"]，data 每行必须包含维度值和每个系列的数值：{ "五级标签": "标签1", "车系A": 12, "车系B": 8 }。
 7. rootCauses 里的每个对象必须是：
    { "keyword": "...", "count": 1, "ratio": 10.0, "evidence": ["原声片段样例"] }
 8. 分布类明细不要输出 tables，优先输出 pie 实心饼图或 bar 柱状图；根因关键词不要输出 tables，输出 rootCauses 即可，系统会转成柱状图。
 9. 分布/排行类图表 data 默认只输出 Top ${DEFAULT_REPORT_CHART_LIMIT}；只有用户问题明确写出 topN、Top N、前N、前 N 名等数量时，才输出用户指定数量，禁止默认输出 Top20。
 10. 如果数据为空，也要输出空数组和命中记录为 0 的 metric。
+11. 用户点名多个车系/车型对比同一维度时，禁止分别输出“车系A维度分布”和“车系B维度分布”两张重复图；必须输出一张 stackedBar 对比图。
 
 只输出 Python 代码。`;
 
@@ -331,6 +344,7 @@ interface SmartTableContextRow extends QueryResultRow {
 
 interface SmartTableContext extends SmartTableContextRow {
   sample_rows: Array<Record<string, unknown>>;
+  value_examples: Record<string, string[]>;
 }
 
 interface ChartSpec {
@@ -361,6 +375,8 @@ interface ReportPlanChart {
   type?: ReportChartType;
   dimension?: string;
   measure?: string;
+  seriesField?: string;
+  series?: string[];
   limit?: number;
 }
 
@@ -430,11 +446,100 @@ interface DeepSeekMessage {
   content: string;
 }
 
+interface StoredChatMessageRow extends QueryResultRow {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  thinking: string | null;
+  sql_text: string | null;
+  sources: unknown;
+  chart: unknown;
+  metadata: unknown;
+  created_at: Date;
+}
+
+interface StoredChatArtifactRow extends QueryResultRow {
+  id: string;
+  session_id: string;
+  message_id: string | null;
+  artifact_type: ArtifactType;
+  title: string | null;
+  summary: string | null;
+  sql_text: string | null;
+  filters: unknown;
+  dimensions: unknown;
+  measures: unknown;
+  data: unknown;
+  metadata: unknown;
+  created_at: Date;
+  artifact_index: number | string;
+  artifact_count: number | string;
+}
+
+type ArtifactType = 'simple_query' | 'chart' | 'report';
+
+interface InsertChatArtifactInput {
+  sessionId: string;
+  messageId: string;
+  artifactType: ArtifactType;
+  title?: string;
+  summary?: string;
+  sqlText?: string;
+  filters?: unknown;
+  dimensions?: unknown[];
+  measures?: unknown[];
+  data?: unknown;
+  metadata?: Record<string, unknown>;
+}
+
+interface ConversationContext {
+  recentMessages: StoredChatMessageRow[];
+  recentArtifacts: StoredChatArtifactRow[];
+  artifactSummary: string;
+}
+
+interface KnowledgeItemRow extends QueryResultRow {
+  id: string;
+  title: string;
+  category: string;
+  standard_term: string | null;
+  aliases: unknown;
+  keywords: unknown;
+  content: string;
+  field_name: string | null;
+  formula: string | null;
+  business_domain: string | null;
+  applicable_intents: unknown;
+  priority: number;
+  status: string;
+}
+
+interface KnowledgeCandidateRow extends KnowledgeItemRow {
+  term_score: string | number;
+  matched_terms: unknown;
+}
+
+interface RelevantKnowledgeItem {
+  id: string;
+  title: string;
+  category: string;
+  standardTerm: string;
+  aliases: string[];
+  keywords: string[];
+  content: string;
+  fieldName: string;
+  formula: string;
+  priority: number;
+  termScore: number;
+  matchedTerms: string[];
+  score: number;
+}
+
 export async function POST(request: NextRequest) {
   let sessionId: string | undefined;
   let contextWarning = false;
   try {
-    const { query, isReasoning, history, smartTableIds, conversationId } = await request.json();
+    const { query, isReasoning, smartTableIds, conversationId } = await request.json();
 
     if (!query || typeof query !== 'string') {
       return new Response(JSON.stringify({ error: 'query is required' }), {
@@ -465,6 +570,11 @@ export async function POST(request: NextRequest) {
       userQuery: query,
       tables,
     });
+
+    const conversationContext = await loadConversationContext(sessionId);
+    const relevantKnowledge = await loadRelevantKnowledge(query, tables);
+    const businessKnowledgePrompt = buildBusinessKnowledgePrompt(relevantKnowledge);
+
     await insertChatMessage({
       sessionId,
       role: 'user',
@@ -477,16 +587,17 @@ export async function POST(request: NextRequest) {
     });
 
     const tableContext = buildTableContextPrompt(tables);
-    const historyMessages = buildHistoryMessages(history);
-    const reasoningEnabled = isReasoning === true || await shouldEnableReasoningForFollowUp(query, historyMessages);
+    const contextMessages = buildConversationContextMessages(conversationContext, query);
+    const reasoningEnabled = isReasoning === true || await shouldEnableReasoningForFollowUp(query, contextMessages);
     const plannerPrompt = [
       tableContext,
+      businessKnowledgePrompt,
       `用户问题：${query}`,
     ].filter(Boolean).join('\n\n');
 
     const fullMessages: DeepSeekMessage[] = [
       { role: 'system', content: PLANNER_SYSTEM_PROMPT },
-      ...historyMessages,
+      ...contextMessages,
       { role: 'user', content: plannerPrompt },
     ];
     const contextChars = estimateContextChars(fullMessages);
@@ -497,14 +608,18 @@ export async function POST(request: NextRequest) {
       { thinking: reasoningEnabled, reasoningEffort: 'high', temperature: 0.1 }
     );
 
-    const plan = parseSqlPlanOrFallback(planText, query);
+    let plan = parseSqlPlanOrFallback(planText, query);
+    if (shouldSuppressSampleBasedClarify(plan, query)) {
+      plan = createFallbackSqlReportPlan(query, tables);
+    }
     if (plan.intent === 'report') {
       return streamSmartReportResponse({
         sessionId,
         userQuery: query,
-        history,
+        contextMessages,
         tables,
         tableContext,
+        businessKnowledgePrompt,
         reasoningEnabled,
         intentPlan: plan,
         contextWarning,
@@ -518,6 +633,8 @@ export async function POST(request: NextRequest) {
         reasoningEnabled,
         intentPlan: plan,
         contextWarning,
+        hasConversationContext: conversationContext.recentArtifacts.length > 0,
+        businessKnowledgePrompt,
       });
     }
     if (plan.intent === 'clarify') {
@@ -539,6 +656,7 @@ export async function POST(request: NextRequest) {
       sql: safeSql,
       rows: queryRows,
       tables,
+      businessKnowledgePrompt,
     });
 
     const { content: answer, usage: answerUsage } = await callDeepSeek(
@@ -554,8 +672,9 @@ export async function POST(request: NextRequest) {
       userQuery: query,
       answer: answerParts.content || answer,
       tables,
+      businessKnowledgePrompt,
     });
-    await insertChatMessage({
+    const assistantMessageId = await insertChatMessage({
       sessionId,
       role: 'assistant',
       content: answerParts.content || answer,
@@ -575,6 +694,21 @@ export async function POST(request: NextRequest) {
                 totalTokens: (planUsage?.total_tokens ?? 0) + (answerUsage?.total_tokens ?? 0) + (followUpsUsage?.total_tokens ?? 0),
               }
             : null,
+      },
+    });
+    await insertChatArtifact({
+      sessionId,
+      messageId: assistantMessageId,
+      artifactType: 'simple_query',
+      title: buildSessionTitle(query),
+      summary: answerParts.content || answer,
+      sqlText: answerParts.sql || safeSql,
+      filters: buildSqlFilterArtifact(safeSql),
+      data: queryRows.slice(0, 50).map((row) => sanitizeRow(row, 320)),
+      metadata: {
+        rowCount: queryRows.length,
+        physicalTables: tables.map((table) => table.physical_table_name),
+        followUps,
       },
     });
 
@@ -603,6 +737,8 @@ function streamChartResponse({
   reasoningEnabled,
   intentPlan,
   contextWarning,
+  hasConversationContext,
+  businessKnowledgePrompt,
 }: {
   sessionId: string;
   userQuery: string;
@@ -610,6 +746,8 @@ function streamChartResponse({
   reasoningEnabled: boolean;
   intentPlan: SqlPlan;
   contextWarning: boolean;
+  hasConversationContext: boolean;
+  businessKnowledgePrompt: string;
 }): Response {
   const encoder = new TextEncoder();
   const sourceNames = tables.map((table) => table.name);
@@ -628,6 +766,9 @@ function streamChartResponse({
         send({ sessionId, contextWarning });
         progress(`意图识别：生成图表（chart）\n`);
         progress(`理解说明：${intentPlan.reason || '用户需要可视化图表分析。'}\n`);
+        if (hasConversationContext) {
+          progress(`上下文承接：已读取本会话上一轮结构化结果，优先沿用相关筛选、图表点位和实体线索。\n`);
+        }
         progress(`确认数据源：${sourceNames.join('、') || '已选智能问数表'}\n`);
 
         if (!intentPlan.sql) {
@@ -657,15 +798,16 @@ function streamChartResponse({
         }
 
         const chartData = buildChartDataFromRows(queryRows, chartSpec, userQuery);
-        const { analysis: rawAnalysis, usage: chartAnalysisUsage } = await generateChartAnalysis(userQuery, safeSql, chartData, chartSpec, reasoningEnabled);
+        const { analysis: rawAnalysis, usage: chartAnalysisUsage } = await generateChartAnalysis(userQuery, safeSql, chartData, chartSpec, reasoningEnabled, businessKnowledgePrompt);
         const analysisContent = rawAnalysis || buildFallbackChartAnalysis(chartData, queryRows.length);
         const { followUps, usage: followUpsUsage } = await generateFollowUps({
           userQuery,
           answer: analysisContent,
           tables,
+          businessKnowledgePrompt,
         });
 
-        await insertChatMessage({
+        const assistantMessageId = await insertChatMessage({
           sessionId,
           role: 'assistant',
           content: analysisContent,
@@ -683,6 +825,24 @@ function streamChartResponse({
                     totalTokens: (chartAnalysisUsage?.total_tokens ?? 0) + (followUpsUsage?.total_tokens ?? 0),
                   }
                 : null,
+          },
+        });
+
+        await insertChatArtifact({
+          sessionId,
+          messageId: assistantMessageId,
+          artifactType: 'chart',
+          title: chartData.title,
+          summary: analysisContent,
+          sqlText: safeSql,
+          filters: buildSqlFilterArtifact(safeSql),
+          dimensions: chartSpec?.dimension ? [chartSpec.dimension] : [],
+          measures: chartSpec?.measure ? [chartSpec.measure] : [],
+          data: chartData,
+          metadata: {
+            chartSpec,
+            rowCount: queryRows.length,
+            followUps,
           },
         });
 
@@ -790,7 +950,12 @@ function buildChartDataFromRows(
     const data = rows.slice(0, 15).map((row, index) => {
       const rawName = row[dimKey];
       const name = formatChartLabel(String(rawName ?? `项${index + 1}`), chartSpec?.dimension || '');
-      const entries: Record<string, string | number> = { name, value: 0, color: COLORS[index % COLORS.length] };
+      const entries: Record<string, string | number> = {
+        name,
+        value: 0,
+        color: COLORS[index % COLORS.length],
+        rawDimensionValue: String(rawName ?? ''),
+      };
       let total = 0;
       for (const sk of seriesLabels) {
         const raw = row[sk];
@@ -819,7 +984,7 @@ function buildChartDataFromRows(
     const name = formatChartLabel(String(rawName ?? `项${index + 1}`), chartSpec?.dimension || '');
     const rawValue = row[valKey];
     const value = typeof rawValue === 'number' ? rawValue : Number(rawValue) || 0;
-    return { name, value, color: COLORS[index % COLORS.length] };
+    return { name, value, color: COLORS[index % COLORS.length], rawDimensionValue: String(rawName ?? '') };
   });
 
   const isProportionChart = chartType === 'pie' || chartType === 'donut';
@@ -896,10 +1061,11 @@ async function generateChartAnalysis(
   chartData: { title: string; type: string; data: ChartDataPoint[] },
   chartSpec: ChartSpec | undefined,
   reasoningEnabled: boolean,
+  businessKnowledgePrompt: string,
 ): Promise<{ analysis: string; usage: DeepSeekUsage | null }> {
   const dataSummary = computeChartStats(chartData);
 
-  const prompt = `用户问题：${userQuery}
+  const prompt = `${businessKnowledgePrompt ? `${businessKnowledgePrompt}\n\n` : ''}用户问题：${userQuery}
 
 图表标题：${chartData.title || chartSpec?.title || '数据分析图表'}
 图表类型：${chartData.type || chartSpec?.type || 'bar'}
@@ -946,18 +1112,20 @@ function buildFallbackChartAnalysis(
 function streamSmartReportResponse({
   sessionId,
   userQuery,
-  history,
+  contextMessages,
   tables,
   tableContext,
+  businessKnowledgePrompt,
   reasoningEnabled,
   intentPlan,
   contextWarning,
 }: {
   sessionId: string;
   userQuery: string;
-  history: unknown;
+  contextMessages: DeepSeekMessage[];
   tables: SmartTableContext[];
   tableContext: string;
+  businessKnowledgePrompt: string;
   reasoningEnabled: boolean;
   intentPlan: SqlPlan;
   contextWarning: boolean;
@@ -983,9 +1151,10 @@ function streamSmartReportResponse({
 
         const reportResult = await buildSmartReport({
           userQuery,
-          history,
+          contextMessages,
           tables,
           tableContext,
+          businessKnowledgePrompt,
           reasoningEnabled,
           onProgress: progress,
         });
@@ -1013,7 +1182,7 @@ function streamSmartReportResponse({
 
         progress(`报告生成完成，已输出业务报告。\n`);
 
-        await insertChatMessage({
+        const assistantMessageId = await insertChatMessage({
           sessionId,
           role: 'assistant',
           content: reportResult.content?.trim() || '',
@@ -1027,6 +1196,24 @@ function streamSmartReportResponse({
             pythonCode: reportResult.pythonCode,
             followUps: reportResult.followUps,
             tokenUsage: reportResult.tokenUsage,
+          },
+        });
+        await insertChatArtifact({
+          sessionId,
+          messageId: assistantMessageId,
+          artifactType: 'report',
+          title: reportResult.report?.title || buildReportTitle(userQuery),
+          summary: reportResult.report?.finalSummary?.summary || reportResult.report?.executiveSummary || reportResult.content,
+          sqlText: reportResult.sql,
+          filters: buildReportFilterArtifact(reportResult.plan),
+          dimensions: uniqueStrings((reportResult.report?.charts || []).map((chart) => chart.dimension)),
+          measures: uniqueStrings((reportResult.report?.charts || []).flatMap((chart) => chart.measures)),
+          data: reportResult.report,
+          metadata: {
+            reportPlan: reportResult.plan,
+            pythonCode: reportResult.pythonCode,
+            followUps: reportResult.followUps,
+            recordCount: reportResult.report?.recordCount,
           },
         });
 
@@ -1069,22 +1256,24 @@ function streamSmartReportResponse({
 
 async function buildSmartReport({
   userQuery,
-  history,
+  contextMessages,
   tables,
   tableContext,
+  businessKnowledgePrompt,
   reasoningEnabled,
   onProgress,
 }: {
   userQuery: string;
-  history: unknown;
+  contextMessages: DeepSeekMessage[];
   tables: SmartTableContext[];
   tableContext: string;
+  businessKnowledgePrompt: string;
   reasoningEnabled: boolean;
   onProgress?: ReportProgressCallback;
 }): Promise<SmartReportBuildResult> {
-  const historyMessages = buildHistoryMessages(history);
   const planPrompt = [
     tableContext,
+    businessKnowledgePrompt,
     `用户问题：${userQuery}`,
   ].filter(Boolean).join('\n\n');
 
@@ -1096,7 +1285,7 @@ async function buildSmartReport({
     const { content: planText, usage: _planUsage } = await callDeepSeek(
       [
         { role: 'system', content: REPORT_PLANNER_SYSTEM_PROMPT },
-        ...historyMessages,
+        ...contextMessages,
         { role: 'user', content: planPrompt },
       ],
       { thinking: reasoningEnabled, reasoningEffort: 'high', temperature: 0.12 }
@@ -1183,7 +1372,13 @@ async function buildSmartReport({
       : `Python处理：未产出可用结果，已切换为结构化分析结果。`,
     { progressPhase: 'python' }
   );
-  const artifacts = generatedPython?.artifacts || fallbackArtifacts;
+  const artifacts = enhanceReportArtifactsForComparison(
+    generatedPython?.artifacts || fallbackArtifacts,
+    userQuery,
+    queryRows,
+    reportPlan,
+    tables,
+  );
   onProgress?.(`报告撰写：为每张图表生成业务解读和最终摘要。\n`);
   onProgress?.(`思考中...\n`);
   const { narrative, usage: narrativeUsage } = await writeReportNarrative({
@@ -1192,6 +1387,7 @@ async function buildSmartReport({
     rowCount: queryRows.length,
     tables,
     artifacts,
+    businessKnowledgePrompt,
   });
 
   const report: SmartReport = {
@@ -1465,6 +1661,233 @@ function buildReportArtifacts({
   };
 }
 
+function enhanceReportArtifactsForComparison(
+  artifacts: ReportArtifacts,
+  userQuery: string,
+  rows: Array<Record<string, unknown>>,
+  plan: ReportPlan,
+  tables: SmartTableContext[],
+): ReportArtifacts {
+  const comparisonCharts = buildComparisonCharts(rows, plan, tables, userQuery);
+  if (comparisonCharts.length === 0) return artifacts;
+
+  const comparisonDimensions = new Set(comparisonCharts.map((chart) => normalizeField(chart.dimension)));
+  const comparisonIds = new Set(comparisonCharts.map((chart) => chart.id));
+  const retainedCharts = artifacts.charts.filter((chart) => {
+    if (comparisonIds.has(chart.id)) return false;
+    return !comparisonDimensions.has(normalizeField(chart.dimension));
+  });
+
+  return {
+    ...artifacts,
+    charts: [...comparisonCharts, ...retainedCharts].slice(0, 6),
+  };
+}
+
+function buildComparisonCharts(
+  rows: Array<Record<string, unknown>>,
+  plan: ReportPlan,
+  tables: SmartTableContext[],
+  userQuery: string,
+): SmartReportChart[] {
+  const seriesContext = resolveComparisonSeriesContext(rows, tables, userQuery);
+  if (!seriesContext) return [];
+
+  const dimensions = resolveComparisonDimensions(plan, tables, rows, userQuery, seriesContext.field);
+  const limit = resolveReportChartLimit(userQuery);
+
+  return dimensions
+    .map((dimension): SmartReportChart | undefined => {
+      const data = buildStackedDistributionRows(rows, dimension, seriesContext.field, seriesContext.values, limit);
+      if (data.length === 0) return undefined;
+
+      return {
+        id: normalizeId(`comparison_${seriesContext.field}_${dimension}`),
+        title: `${seriesContext.values.join(' vs ')}${shortReportDimensionName(dimension)}对比`,
+        subtitle: `按 ${dimension} 分组，对比 ${seriesContext.field} 的记录数`,
+        type: 'stackedBar',
+        dimension,
+        measures: seriesContext.values,
+        data,
+      };
+    })
+    .filter(isDefined)
+    .slice(0, 3);
+}
+
+function resolveComparisonSeriesContext(
+  rows: Array<Record<string, unknown>>,
+  tables: SmartTableContext[],
+  userQuery: string,
+  chartPlan?: ReportPlanChart,
+): { field: string; values: string[] } | undefined {
+  const fields = getAvailableFields(tables, rows);
+  const seriesField = resolveFieldName(chartPlan?.seriesField || '', rows, tables)
+    || findFieldByKeywords(fields, ['车系', '车型', '车型名称', '产品型号', '型号']);
+  if (!seriesField) return undefined;
+
+  const distinctValues = uniqueStrings(rows.map((row) => normalizeCellValue(row[seriesField]))).slice(0, 40);
+  if (distinctValues.length < 2) return undefined;
+
+  const requestedValues = uniqueStrings([
+    ...(Array.isArray(chartPlan?.series) ? chartPlan.series.map(String) : []),
+    ...extractVehicleCompareCandidates(userQuery),
+  ]);
+  const matchedValues = uniqueStrings(
+    requestedValues
+      .map((value) => findMatchingSeriesValue(value, distinctValues))
+      .filter(isDefined)
+  );
+  if (matchedValues.length >= 2) {
+    return { field: seriesField, values: matchedValues.slice(0, 6) };
+  }
+
+  if (!looksLikeVehicleComparisonQuery(userQuery)) return undefined;
+  return { field: seriesField, values: distinctValues.slice(0, 6) };
+}
+
+function resolveComparisonDimensions(
+  plan: ReportPlan,
+  tables: SmartTableContext[],
+  rows: Array<Record<string, unknown>>,
+  userQuery: string,
+  seriesField: string,
+): string[] {
+  const fields = getAvailableFields(tables, rows);
+  const queryDimensions = [
+    /五级/.test(userQuery) ? findFieldByKeywords(fields, ['通用五级标签', '五级标签', '五级']) : undefined,
+    /四级/.test(userQuery) ? findFieldByKeywords(fields, ['通用四级标签', '四级标签', '四级']) : undefined,
+    /三级渠道|渠道/.test(userQuery) ? findFieldByKeywords(fields, ['三级渠道', '渠道', '来源', '数据来源']) : undefined,
+    /投诉意图|意图/.test(userQuery) ? findFieldByKeywords(fields, ['投诉意图', '用户意图', '意图']) : undefined,
+    /三级标签/.test(userQuery) ? findFieldByKeywords(fields, ['通用三级标签', '三级标签', '三级']) : undefined,
+  ].filter(isDefined);
+  const planDimensions = (plan.charts || [])
+    .map((chart) => resolveFieldName(chart.dimension || '', rows, tables))
+    .filter(isDefined);
+
+  return uniqueStrings([...queryDimensions, ...planDimensions])
+    .filter((dimension) => normalizeField(dimension) !== normalizeField(seriesField))
+    .filter((dimension) => !/时间|日期|月份|month|date/i.test(dimension))
+    .slice(0, 4);
+}
+
+function buildStackedDistributionRows(
+  rows: Array<Record<string, unknown>>,
+  dimension: string,
+  seriesField: string,
+  seriesValues: string[],
+  limit: number,
+): Array<Record<string, string | number>> {
+  const countField = findCountWeightField(rows, dimension, seriesField);
+  const counts = new Map<string, Map<string, number>>();
+  let grandTotal = 0;
+
+  for (const row of rows) {
+    const dimensionValue = normalizeCellValue(row[dimension]);
+    const rawSeriesValue = normalizeCellValue(row[seriesField]);
+    const seriesValue = findMatchingSeriesValue(rawSeriesValue, seriesValues);
+    if (!dimensionValue || !seriesValue) continue;
+
+    const weight = countField ? Number(row[countField]) || 0 : 1;
+    if (weight <= 0) continue;
+
+    const current = counts.get(dimensionValue) || new Map<string, number>();
+    current.set(seriesValue, (current.get(seriesValue) || 0) + weight);
+    counts.set(dimensionValue, current);
+    grandTotal += weight;
+  }
+
+  return Array.from(counts.entries())
+    .map(([dimensionValue, seriesCounts]) => {
+      const record: Record<string, string | number> = { [dimension]: dimensionValue };
+      let total = 0;
+      for (const seriesValue of seriesValues) {
+        const count = seriesCounts.get(seriesValue) || 0;
+        record[seriesValue] = count;
+        total += count;
+      }
+      record['总计'] = total;
+      record['占比'] = grandTotal > 0 ? Number(((total / grandTotal) * 100).toFixed(1)) : 0;
+      return record;
+    })
+    .filter((record) => Number(record['总计'] || 0) > 0)
+    .sort((a, b) => Number(b['总计'] || 0) - Number(a['总计'] || 0))
+    .slice(0, limit);
+}
+
+function findCountWeightField(rows: Array<Record<string, unknown>>, dimension: string, seriesField: string): string | undefined {
+  const firstRow = rows[0];
+  if (!firstRow) return undefined;
+  return Object.keys(firstRow).find((key) => {
+    if (normalizeField(key) === normalizeField(dimension) || normalizeField(key) === normalizeField(seriesField)) return false;
+    if (!/数量|记录数|次数|count|cnt|total/i.test(key)) return false;
+    const value = firstRow[key];
+    return typeof value === 'number' || (typeof value === 'string' && Number.isFinite(Number(value)));
+  });
+}
+
+function extractVehicleCompareCandidates(userQuery: string): string[] {
+  const matches: string[] = [];
+  const quotedMatches = userQuery.matchAll(/[“"']([^”"']{1,40})[”"']/g);
+  for (const match of quotedMatches) {
+    if (/车系|车型/.test(match[1])) matches.push(match[1].trim());
+  }
+
+  const vehicleMatches = userQuery.matchAll(/(车系|车型)\s*([^，。；;、和与及\s的]{1,30})/g);
+  for (const match of vehicleMatches) {
+    const prefix = match[1];
+    const value = match[2].trim();
+    if (!value || /分布|报告|分析|对比|渠道|标签|意图/.test(value)) continue;
+    matches.push(`${prefix}${value}`);
+  }
+
+  return uniqueStrings(matches);
+}
+
+function findMatchingSeriesValue(candidate: string, values: string[]): string | undefined {
+  const normalizedCandidate = normalizeField(candidate);
+  if (!normalizedCandidate) return undefined;
+  return values.find((value) => normalizeField(value) === normalizedCandidate)
+    || values.find((value) => {
+      const normalizedValue = normalizeField(value);
+      return normalizedCandidate.length >= 2 && normalizedValue.includes(normalizedCandidate);
+    })
+    || values.find((value) => {
+      const normalizedValue = normalizeField(value);
+      return normalizedValue.length >= 2 && normalizedCandidate.includes(normalizedValue);
+    });
+}
+
+function looksLikeVehicleComparisonQuery(userQuery: string): boolean {
+  return /车系|车型/.test(userQuery) && /竞品|对比|比较|分别|以及|和|与|vs|VS/.test(userQuery);
+}
+
+function shortReportDimensionName(value: string): string {
+  return value
+    .replace(/^通用/, '')
+    .replace(/分布|趋势|分析|数量|Top\s*\d+/gi, '')
+    .trim() || value;
+}
+
+function shouldSuppressSampleBasedClarify(plan: SqlPlan, userQuery: string): boolean {
+  if (plan.intent !== 'clarify') return false;
+  const text = `${plan.reason || ''}${plan.clarifying_question || ''}`;
+  const looksLikeMissingValue = /不存在|未找到|没有.*数据|样例.*没有|数据中.*没有|不在.*数据/.test(text);
+  const asksForAnalysis = /报告|分析|分布|趋势|对比|竞品|渠道|标签|词云|车系|车型|意图/.test(userQuery);
+  const namesConcreteVehicle = /车系\w+|车型\w+|车系[A-Za-z0-9一二三四五六七八九十]+|车型[A-Za-z0-9一二三四五六七八九十]+/.test(userQuery);
+
+  return looksLikeMissingValue && (asksForAnalysis || namesConcreteVehicle);
+}
+
+function createFallbackSqlReportPlan(userQuery: string, tables: SmartTableContext[]): SqlPlan {
+  const fallback = createFallbackReportPlan(userQuery, tables);
+  return {
+    intent: 'report',
+    sql: fallback.sql,
+    reason: '用户提出综合分析/报告诉求；不能因为样例行未覆盖点名业务值就判断不存在，改为执行 SQL 验证。',
+  };
+}
+
 function buildReportCharts(rows: Array<Record<string, unknown>>, plan: ReportPlan, tables: SmartTableContext[], userQuery: string): SmartReportChart[] {
   const chartPlans = (plan.charts && plan.charts.length > 0 ? plan.charts : createFallbackReportPlan('', tables).charts) || [];
   const charts: SmartReportChart[] = [];
@@ -1494,13 +1917,32 @@ function buildReportCharts(rows: Array<Record<string, unknown>>, plan: ReportPla
       continue;
     }
 
+    if (chartType === 'stackedBar') {
+      const seriesContext = resolveComparisonSeriesContext(rows, tables, userQuery, chartPlan);
+      if (seriesContext) {
+        const data = buildStackedDistributionRows(rows, dimension, seriesContext.field, seriesContext.values, limit);
+        if (data.length > 0) {
+          charts.push({
+            id: normalizeId(chartPlan.id || `comparison_${seriesContext.field}_${dimension}`),
+            title: chartPlan.title || `${seriesContext.values.join(' vs ')}${shortReportDimensionName(dimension)}对比`,
+            subtitle: `按 ${dimension} 分组，对比 ${seriesContext.field} 的记录数`,
+            type: 'stackedBar',
+            dimension,
+            measures: seriesContext.values,
+            data,
+          });
+          continue;
+        }
+      }
+    }
+
     const distribution = buildDistributionRows(rows, dimension, limit);
     if (distribution.length === 0) continue;
     charts.push({
       id: normalizeId(chartPlan.id || `${dimension}_distribution`),
       title: chartPlan.title || `${dimension}分布`,
       subtitle: `Top ${distribution.length}，按记录数统计`,
-      type: chartType,
+      type: chartType === 'stackedBar' ? 'bar' : chartType,
       dimension,
       measures: [measure],
       data: distribution.map((item) => ({
@@ -1991,6 +2433,7 @@ async function writeReportNarrative({
   rowCount,
   tables,
   artifacts,
+  businessKnowledgePrompt,
 }: {
   userQuery: string;
   plan: ReportPlan;
@@ -2002,6 +2445,7 @@ async function writeReportNarrative({
     tables: SmartReportTable[];
     rootCauses: SmartReportRootCause[];
   };
+  businessKnowledgePrompt: string;
 }): Promise<{ narrative: ReportNarrative; usage: DeepSeekUsage | null }> {
   const fallback = buildFallbackNarrative(userQuery, rowCount, artifacts);
   try {
@@ -2012,6 +2456,7 @@ async function writeReportNarrative({
           role: 'user',
           content: JSON.stringify({
             userQuery,
+            businessKnowledge: businessKnowledgePrompt,
             plan: {
               title: plan.title,
               reason: plan.reason,
@@ -2174,7 +2619,11 @@ function buildFallbackChartExplanation(chart: SmartReportChart): SmartReportChar
   const measure = chart.measures[0] || '数量';
   const first = chart.data[0];
   const firstName = first ? String(first[chart.dimension] || '') : '';
-  const firstValue = first ? Number(first[measure] || 0) : 0;
+  const firstValue = first
+    ? chart.type === 'stackedBar'
+      ? chart.measures.reduce((sum, item) => sum + Number(first[item] || 0), 0)
+      : Number(first[measure] || 0)
+    : 0;
   const explanation = firstName
     ? `${chart.title}中，「${firstName}」排名最高，共 ${firstValue} 条，建议优先作为后续拆解和抽样复核对象。`
     : `${chart.title}当前没有明显可展示的数据，建议核对筛选条件或补充样本。`;
@@ -2373,7 +2822,7 @@ function extractLikelyTagValue(userQuery: string): string {
 }
 
 function normalizeChartType(type: unknown): Exclude<ReportChartType, 'table'> {
-  if (type === 'line' || type === 'pie' || type === 'donut' || type === 'bar') return type;
+  if (type === 'line' || type === 'pie' || type === 'donut' || type === 'bar' || type === 'stackedBar') return type;
   return 'bar';
 }
 
@@ -2492,12 +2941,13 @@ async function insertChatMessage({
   metadata?: Record<string, unknown>;
   status?: 'success' | 'failure';
   errorMessage?: string;
-}): Promise<void> {
+}): Promise<string> {
   const chartPayload = metadata.chart && typeof metadata.chart === 'object' ? metadata.chart : null;
 
-  await pgQuery(
+  const result = await pgQuery<{ id: string }>(
     `INSERT INTO chat_messages (session_id, role, content, thinking, sql_text, sources, chart, metadata, status, error_message)
-     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9, $10)`,
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9, $10)
+     RETURNING id`,
     [
       sessionId,
       role,
@@ -2511,6 +2961,615 @@ async function insertChatMessage({
       errorMessage || null,
     ]
   );
+
+  return result.rows[0]?.id || '';
+}
+
+async function insertChatArtifact({
+  sessionId,
+  messageId,
+  artifactType,
+  title,
+  summary,
+  sqlText,
+  filters = {},
+  dimensions = [],
+  measures = [],
+  data,
+  metadata = {},
+}: InsertChatArtifactInput): Promise<void> {
+  if (!messageId) return;
+  await pgQuery(
+    `INSERT INTO chat_artifacts (
+       session_id, message_id, artifact_type, title, summary, sql_text,
+       filters, dimensions, measures, data, metadata
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb)`,
+    [
+      sessionId,
+      messageId,
+      artifactType,
+      title || null,
+      summary || null,
+      sqlText || null,
+      JSON.stringify(filters || {}),
+      JSON.stringify(dimensions || []),
+      JSON.stringify(measures || []),
+      data === undefined ? null : JSON.stringify(data),
+      JSON.stringify(metadata || {}),
+    ]
+  );
+}
+
+async function loadConversationContext(sessionId: string): Promise<ConversationContext> {
+  const result = await pgQuery<StoredChatMessageRow>(
+    `SELECT id, role, content, thinking, sql_text, sources, chart, metadata, created_at
+     FROM chat_messages
+     WHERE session_id = $1
+       AND role IN ('user', 'assistant')
+       AND status = 'success'
+     ORDER BY created_at DESC
+     LIMIT $2`,
+    [sessionId, MAX_HISTORY_MESSAGES]
+  );
+  const recentMessages = [...result.rows].reverse();
+  const artifactResult = await pgQuery<StoredChatArtifactRow>(
+    `WITH ranked_artifacts AS (
+       SELECT id, session_id, message_id, artifact_type, title, summary, sql_text,
+              filters, dimensions, measures, data, metadata, created_at,
+              ROW_NUMBER() OVER (ORDER BY created_at ASC) AS artifact_index,
+              COUNT(*) OVER () AS artifact_count
+       FROM chat_artifacts
+       WHERE session_id = $1
+     )
+     SELECT id, session_id, message_id, artifact_type, title, summary, sql_text,
+            filters, dimensions, measures, data, metadata, created_at,
+            artifact_index, artifact_count
+     FROM ranked_artifacts
+     WHERE artifact_index <= 3
+        OR artifact_index > GREATEST(artifact_count - $2, 0)
+     ORDER BY artifact_index ASC`,
+    [sessionId, MAX_CONTEXT_ARTIFACTS]
+  );
+  const recentArtifacts = artifactResult.rows;
+
+  return {
+    recentMessages,
+    recentArtifacts,
+    artifactSummary: buildStoredArtifactsSummary(recentArtifacts),
+  };
+}
+
+function buildConversationContextMessages(context: ConversationContext, userQuery: string): DeepSeekMessage[] {
+  let userQuestionIndex = 0;
+  const recentMessages = context.recentMessages.reduce<DeepSeekMessage[]>((messages, message) => {
+    if (message.role === 'user') userQuestionIndex += 1;
+    const content = buildStoredHistoryContent(message, message.role === 'user' ? userQuestionIndex : undefined);
+    if (!content) return messages;
+    const maxLen = message.role === 'user' ? MAX_HISTORY_USER_CHARS : MAX_HISTORY_ASSISTANT_CHARS;
+    messages.push({
+      role: message.role as 'user' | 'assistant',
+      content: compactText(content, maxLen),
+    });
+    return messages;
+  }, []);
+
+  const referenceSummary = resolveArtifactReferenceSummary(userQuery, context.recentArtifacts);
+  const artifactMessage: DeepSeekMessage[] = context.artifactSummary
+    ? [{
+        role: 'assistant',
+        content: [
+          '【数据库恢复的结构化问数上下文】',
+          '引用规则：当用户说“刚才/上面/其中/这个”时优先使用最近一次 artifact；当用户说“第N张图/图表N”时优先使用报告内图表编号；当用户说“第N个问题/第一次/第N次查询”时优先使用 Artifact N 或用户问题编号；当用户说“TopN里的X/只看X/把异常点展开”时优先在 artifact 的实体候选和Top数据中匹配；当用户说“沿用筛选条件”时继承匹配 artifact 的筛选线索和 SQL WHERE 条件。',
+          referenceSummary,
+          context.artifactSummary,
+        ].filter(Boolean).join('\n\n'),
+      }]
+    : [];
+
+  return [...recentMessages, ...artifactMessage];
+}
+
+function buildStoredHistoryContent(message: StoredChatMessageRow, userQuestionIndex?: number): string {
+  const label = message.role === 'user'
+    ? `用户问题#${userQuestionIndex || '?'}`
+    : '助手回答';
+  const parts = [
+    `${label}：${message.content}`,
+    message.sql_text ? `SQL：${compactText(message.sql_text, 700)}` : '',
+  ].filter(Boolean);
+
+  return parts.join('\n\n');
+}
+
+function buildStoredArtifactsSummary(artifacts: StoredChatArtifactRow[]): string {
+  if (artifacts.length === 0) return '';
+  return artifacts
+    .map((artifact, index) => buildStoredArtifactSummary(artifact, getArtifactIndex(artifact) || index + 1, index === artifacts.length - 1))
+    .join('\n\n---\n\n');
+}
+
+function buildStoredArtifactSummary(artifact: StoredChatArtifactRow, order: number, isLatest: boolean): string {
+  const metadata = asRecord(artifact.metadata);
+  const dimensions = normalizeStoredStringList(artifact.dimensions);
+  const measures = normalizeStoredStringList(artifact.measures);
+  const followUps = normalizeStoredStringList(metadata?.followUps).slice(0, 5);
+  const filterSummary = buildStoredFilterSummary(artifact.filters, metadata);
+  const dataSummary = buildStoredArtifactDataSummary(artifact);
+
+  return [
+    `Artifact ${order}${isLatest ? '（最近一次）' : ''}`,
+    `类型：${artifact.artifact_type}`,
+    artifact.title ? `标题：${artifact.title}` : '',
+    artifact.summary ? `摘要：${compactText(artifact.summary, 800)}` : '',
+    artifact.sql_text ? `SQL：\n${compactText(artifact.sql_text, 1200)}` : '',
+    filterSummary ? `筛选线索：${filterSummary}` : '',
+    dimensions.length > 0 ? `维度：${dimensions.join('、')}` : '',
+    measures.length > 0 ? `指标：${measures.join('、')}` : '',
+    dataSummary,
+    followUps.length > 0 ? `建议追问：${followUps.join('；')}` : '',
+  ].filter(Boolean).join('\n\n');
+}
+
+function buildStoredArtifactDataSummary(artifact: StoredChatArtifactRow): string {
+  if (artifact.artifact_type === 'chart') {
+    const chart = normalizeStoredChart(artifact.data);
+    return chart ? buildStoredChartSummary(chart) : '';
+  }
+  if (artifact.artifact_type === 'report') {
+    const report = normalizeStoredReport(artifact.data);
+    return report ? buildStoredReportSummary(report) : '';
+  }
+  if (artifact.artifact_type === 'simple_query') {
+    const rows = Array.isArray(artifact.data) ? artifact.data.slice(0, 8) : [];
+    if (rows.length === 0) return '';
+    return `结果样例：${rows.map((row) => compactText(JSON.stringify(row), 180)).join('；')}`;
+  }
+  return '';
+}
+
+function buildSqlFilterArtifact(sql: string): Record<string, string> {
+  const whereClause = extractSqlWhereClause(sql);
+  return whereClause ? { sqlWhere: whereClause } : {};
+}
+
+function buildReportFilterArtifact(plan: ReportPlan): Record<string, unknown> {
+  return {
+    timeRange: plan.timeRange || null,
+    filters: plan.filters || [],
+  };
+}
+
+function extractSqlWhereClause(sql: string): string {
+  const match = sql.match(/\bwhere\b([\s\S]*?)(\bgroup\s+by\b|\border\s+by\b|\blimit\b|$)/i);
+  return match?.[1] ? compactText(match[1].trim(), 900) : '';
+}
+
+function buildStoredFilterSummary(filters: unknown, metadata?: Record<string, unknown>): string {
+  const filterRecord = asRecord(filters);
+  const parts: string[] = [];
+
+  const sqlWhere = typeof filterRecord?.sqlWhere === 'string' ? filterRecord.sqlWhere : '';
+  if (sqlWhere) parts.push(`SQL WHERE: ${compactText(sqlWhere, 500)}`);
+
+  const timeRange = asRecord(filterRecord?.timeRange);
+  if (timeRange) {
+    const label = [timeRange.label, timeRange.start && timeRange.end ? `${timeRange.start}至${timeRange.end}` : '']
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+      .join('，');
+    if (label) parts.push(`时间范围: ${label}`);
+  }
+
+  const reportFilters = Array.isArray(filterRecord?.filters) ? filterRecord.filters : [];
+  if (reportFilters.length > 0) {
+    parts.push(`报告筛选: ${reportFilters
+      .map((item) => {
+        const raw = asRecord(item);
+        if (!raw) return '';
+        return `${raw.field || ''}${raw.operator || '='}${raw.value || ''}`;
+      })
+      .filter(Boolean)
+      .join('；')}`);
+  }
+
+  const chartSpec = asRecord(metadata?.chartSpec);
+  if (chartSpec) {
+    const dimension = typeof chartSpec.dimension === 'string' ? chartSpec.dimension : '';
+    const measure = typeof chartSpec.measure === 'string' ? chartSpec.measure : '';
+    if (dimension || measure) parts.push(`图表口径: ${dimension ? `维度=${dimension}` : ''}${measure ? `，指标=${measure}` : ''}`);
+  }
+
+  const reportPlan = asRecord(metadata?.reportPlan);
+  const reportPlanTimeRange = asRecord(reportPlan?.timeRange);
+  if (reportPlanTimeRange && !timeRange) {
+    const label = [reportPlanTimeRange.label, reportPlanTimeRange.start && reportPlanTimeRange.end ? `${reportPlanTimeRange.start}至${reportPlanTimeRange.end}` : '']
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+      .join('，');
+    if (label) parts.push(`报告时间范围: ${label}`);
+  }
+
+  return parts.join('；');
+}
+
+function resolveArtifactReferenceSummary(userQuery: string, artifacts: StoredChatArtifactRow[]): string {
+  if (artifacts.length === 0) return '';
+
+  const lines: string[] = [];
+  const latestArtifact = artifacts[artifacts.length - 1];
+  const chartNumber = extractReferencedChartNumber(userQuery);
+  const artifactNumber = extractReferencedArtifactNumber(userQuery);
+  const topLimit = extractTopLimit(userQuery);
+  const matchedChartPoints = findReferencedChartPoints(userQuery, artifacts);
+  const matchedEntities = findReferencedEntities(userQuery, artifacts);
+  const asksLatest = /刚才|上面|上述|其中|这个|该|继续|基于|沿用|只看|展开/.test(userQuery);
+  const asksFilterInheritance = /沿用|继承|同样|相同|刚才.*筛选|上面.*条件|筛选条件/.test(userQuery);
+  const asksAnomaly = /异常|最高|最低|突增|突降|波动|拐点|展开|拆解/.test(userQuery);
+
+  if (artifactNumber) {
+    const targetArtifact = findArtifactByIndex(artifacts, artifactNumber);
+    lines.push(targetArtifact
+      ? `用户引用 Artifact ${artifactNumber}：优先使用该 artifact 的标题、SQL、筛选线索、维度指标和结果样例。`
+      : `用户引用 Artifact ${artifactNumber}，但当前上下文未加载到该 artifact；如无法确认应反问用户。`);
+  }
+
+  if (chartNumber) {
+    const chartMatch = findReferencedReportChart(artifacts, chartNumber);
+    if (chartMatch) {
+      lines.push(`用户引用图表#${chartNumber}：${chartMatch.reportTitle} / ${chartMatch.chartTitle}，维度=${chartMatch.dimension}，指标=${chartMatch.measures.join('/') || '数量'}。`);
+    } else {
+      lines.push(`用户引用图表#${chartNumber}：优先在最近 report artifact 的图表编号中查找；若不存在则反问确认。`);
+    }
+  }
+
+  if (asksLatest && latestArtifact) {
+    lines.push(`用户存在承接表达：默认引用最近一次 Artifact ${getArtifactIndex(latestArtifact) || artifacts.length}（${latestArtifact.artifact_type}，${latestArtifact.title || '未命名'}）。`);
+  }
+
+  if (topLimit) {
+    lines.push(`用户提到 Top${topLimit}：优先在匹配 artifact 的 Top 数据或实体候选中限定前 ${topLimit} 项。`);
+  }
+
+  if (matchedChartPoints.length > 0) {
+    lines.push(`用户引用了上一轮图表点位：${matchedChartPoints.slice(0, 5).join('；')}。后续 SQL 必须继承该 artifact 的筛选线索，并追加该点位对应的原始维度条件；如果用户同时提到点位数值，应以该点位数值作为样本集合预期，不要扩大到其它日期或默认时间范围。`);
+  }
+
+  if (matchedEntities.length > 0) {
+    lines.push(`用户提到的实体命中 artifact：${matchedEntities.slice(0, 8).join('；')}。后续 SQL 应优先把这些实体作为筛选条件。`);
+  }
+
+  if (asksFilterInheritance) {
+    const target = artifactNumber ? findArtifactByIndex(artifacts, artifactNumber) || latestArtifact : latestArtifact;
+    const filterSummary = target ? buildStoredFilterSummary(target.filters, asRecord(target.metadata)) : '';
+    lines.push(filterSummary
+      ? `用户要求沿用筛选：继承 ${target?.title || '最近 artifact'} 的筛选线索：${filterSummary}。`
+      : '用户要求沿用筛选：优先复用匹配 artifact 的 SQL WHERE 条件；如果没有明确条件则基于当前问题重新判断。');
+  }
+
+  if (asksAnomaly) {
+    lines.push('用户可能在要求展开异常点：优先查找 artifact Top数据中的最高/最低/突变项，生成更细维度或时间趋势查询。');
+  }
+
+  return lines.length > 0 ? `【当前追问引用解析】\n${lines.join('\n')}` : '';
+}
+
+function findArtifactByIndex(artifacts: StoredChatArtifactRow[], artifactIndex: number): StoredChatArtifactRow | undefined {
+  return artifacts.find((artifact) => getArtifactIndex(artifact) === artifactIndex);
+}
+
+function getArtifactIndex(artifact: StoredChatArtifactRow): number | undefined {
+  const index = Number(artifact.artifact_index);
+  return Number.isFinite(index) && index > 0 ? index : undefined;
+}
+
+function findReferencedReportChart(
+  artifacts: StoredChatArtifactRow[],
+  chartNumber: number
+): { reportTitle: string; chartTitle: string; dimension: string; measures: string[] } | undefined {
+  for (const artifact of [...artifacts].reverse()) {
+    if (artifact.artifact_type !== 'report') continue;
+    const report = normalizeStoredReport(artifact.data);
+    const chart = report?.charts[chartNumber - 1];
+    if (report && chart) {
+      return {
+        reportTitle: report.title,
+        chartTitle: chart.title,
+        dimension: chart.dimension,
+        measures: chart.measures,
+      };
+    }
+  }
+  const chartArtifacts = artifacts.filter((artifact) => artifact.artifact_type === 'chart');
+  const chartArtifact = chartArtifacts[chartNumber - 1];
+  const chart = chartArtifact ? normalizeStoredChart(chartArtifact.data) : undefined;
+  if (chart) {
+    return {
+      reportTitle: `Artifact ${getArtifactIndex(chartArtifact) || chartNumber}`,
+      chartTitle: chart.title,
+      dimension: normalizeStoredStringList(chartArtifact.dimensions)[0] || 'name',
+      measures: normalizeStoredStringList(chartArtifact.measures),
+    };
+  }
+  return undefined;
+}
+
+function findReferencedChartPoints(userQuery: string, artifacts: StoredChatArtifactRow[]): string[] {
+  const matches: string[] = [];
+  const queryCounts = extractCountNumbersFromText(userQuery);
+
+  for (const [artifactIndex, artifact] of artifacts.entries()) {
+    const charts = collectArtifactCharts(artifact);
+    for (const chart of charts) {
+      for (const row of chart.rows) {
+        const label = String(row.name || '');
+        const rawDimensionValue = String(row.rawDimensionValue || '');
+        const value = Number(row.value || 0);
+        const matchedDateOrLabel = matchesReferenceLabel(userQuery, label) || matchesReferenceLabel(userQuery, rawDimensionValue);
+        const matchedValue = queryCounts.length === 0 || queryCounts.includes(value);
+        if (!matchedDateOrLabel || !matchedValue) continue;
+
+        matches.push([
+          `Artifact ${getArtifactIndex(artifact) || artifactIndex + 1}`,
+          chart.title ? `图表=${chart.title}` : '',
+          `点位=${label}`,
+          rawDimensionValue && rawDimensionValue !== label ? `原始值=${rawDimensionValue}` : '',
+          `数值=${value}`,
+          chart.dimension ? `维度=${chart.dimension}` : '',
+        ].filter(Boolean).join('，'));
+      }
+    }
+  }
+
+  return uniqueStrings(matches);
+}
+
+function collectArtifactCharts(artifact: StoredChatArtifactRow): Array<{
+  title: string;
+  dimension: string;
+  rows: Array<Record<string, string | number>>;
+}> {
+  if (artifact.artifact_type === 'chart') {
+    const chart = normalizeStoredChart(artifact.data);
+    return chart
+      ? [{
+          title: chart.title,
+          dimension: normalizeStoredStringList(artifact.dimensions)[0] || 'name',
+          rows: chart.data,
+        }]
+      : [];
+  }
+
+  if (artifact.artifact_type === 'report') {
+    const report = normalizeStoredReport(artifact.data);
+    if (!report) return [];
+    return report.charts.map((chart) => ({
+      title: chart.title,
+      dimension: chart.dimension,
+      rows: chart.data.map((row) => ({
+        name: String(row[chart.dimension] ?? ''),
+        rawDimensionValue: String(row[chart.dimension] ?? ''),
+        value: Number(row[chart.measures[0] || '数量'] || 0),
+      })),
+    }));
+  }
+
+  return [];
+}
+
+function matchesReferenceLabel(userQuery: string, label: string): boolean {
+  if (!label) return false;
+  const normalizedQuery = normalizeReferenceText(userQuery);
+  const normalizedLabel = normalizeReferenceText(label);
+  if (normalizedLabel.length >= 2 && normalizedQuery.includes(normalizedLabel)) return true;
+
+  return buildDateReferenceAliases(label).some((alias) => normalizeReferenceText(alias).length >= 2 && normalizedQuery.includes(normalizeReferenceText(alias)));
+}
+
+function buildDateReferenceAliases(value: string): string[] {
+  const text = String(value || '').trim();
+  const aliases = new Set<string>();
+  aliases.add(text);
+
+  const iso = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+  const md = text.match(/^(\d{1,2})[/-](\d{1,2})$/);
+  const cn = text.match(/(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]?/);
+  const month = iso ? Number(iso[2]) : md ? Number(md[1]) : cn ? Number(cn[1]) : undefined;
+  const day = iso ? Number(iso[3]) : md ? Number(md[2]) : cn ? Number(cn[2]) : undefined;
+  const year = iso ? iso[1] : undefined;
+
+  if (month && day) {
+    aliases.add(`${month}/${day}`);
+    aliases.add(`${month}-${day}`);
+    aliases.add(`${month}月${day}日`);
+    aliases.add(`${month}月${day}号`);
+    aliases.add(`${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`);
+    if (year) {
+      aliases.add(`${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`);
+      aliases.add(`${year}年${month}月${day}日`);
+    }
+  }
+
+  return Array.from(aliases);
+}
+
+function extractCountNumbersFromText(text: string): number[] {
+  return uniqueStrings(Array.from(text.matchAll(/(\d+(?:\.\d+)?)\s*(?:条|个|项|次|辆|例|件)/g)).map((match) => match[1]))
+    .map(Number)
+    .filter((value) => Number.isFinite(value));
+}
+
+function findReferencedEntities(userQuery: string, artifacts: StoredChatArtifactRow[]): string[] {
+  const normalizedQuery = normalizeReferenceText(userQuery);
+  const matches: string[] = [];
+
+  for (const [artifactIndex, artifact] of artifacts.entries()) {
+    const labels = collectArtifactEntityLabels(artifact);
+    for (const label of labels) {
+      const normalizedLabel = normalizeReferenceText(label);
+      if (normalizedLabel.length < 2) continue;
+      if (normalizedQuery.includes(normalizedLabel)) {
+        matches.push(`Artifact ${artifactIndex + 1}：${label}`);
+      }
+    }
+  }
+
+  return uniqueStrings(matches);
+}
+
+function collectArtifactEntityLabels(artifact: StoredChatArtifactRow): string[] {
+  if (artifact.artifact_type === 'chart') {
+    const chart = normalizeStoredChart(artifact.data);
+    return chart ? chart.data.map((row) => String(row.name || '')).filter(Boolean) : [];
+  }
+
+  if (artifact.artifact_type === 'report') {
+    const report = normalizeStoredReport(artifact.data);
+    if (!report) return [];
+    return uniqueStrings([
+      ...report.metrics.map((metric) => String(metric.label || '')),
+      ...report.rootCauses.map((cause) => String(cause.keyword || '')),
+      ...report.charts.flatMap((chart) => chart.data.map((row) => String(row[chart.dimension] ?? ''))),
+    ]);
+  }
+
+  if (artifact.artifact_type === 'simple_query' && Array.isArray(artifact.data)) {
+    return uniqueStrings(
+      artifact.data
+        .slice(0, 20)
+        .flatMap((row) => Object.values(asRecord(row) || {}).map((value) => String(value || '')))
+    );
+  }
+
+  return [];
+}
+
+function extractReferencedChartNumber(text: string): number | undefined {
+  const match = text.match(/(?:第\s*([一二三四五六七八九十\d]+)\s*张\s*图|图表\s*#?\s*([一二三四五六七八九十\d]+))/i);
+  return parseReferenceNumber(match?.[1] || match?.[2]);
+}
+
+function extractReferencedArtifactNumber(text: string): number | undefined {
+  const match = text.match(/第\s*([一二三四五六七八九十\d]+)\s*(?:个|次|轮)?\s*(?:问题|查询|结果|分析|artifact)/i)
+    || text.match(/第\s*([一二三四五六七八九十\d]+)\s*次/);
+  return parseReferenceNumber(match?.[1]);
+}
+
+function extractTopLimit(text: string): number | undefined {
+  const match = text.match(/(?:top\s*([0-9]+)|前\s*([一二三四五六七八九十\d]+)\s*(?:个|名|项)?)/i);
+  return parseReferenceNumber(match?.[1] || match?.[2]);
+}
+
+function parseReferenceNumber(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) return Math.round(numeric);
+  const digitMap: Record<string, number> = {
+    一: 1,
+    二: 2,
+    两: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9,
+    十: 10,
+  };
+  if (value === '十') return 10;
+  if (value.startsWith('十')) return 10 + (digitMap[value.slice(1)] || 0);
+  if (value.endsWith('十')) return (digitMap[value.slice(0, -1)] || 1) * 10;
+  if (value.includes('十')) {
+    const [ten, one] = value.split('十');
+    return (digitMap[ten] || 1) * 10 + (digitMap[one] || 0);
+  }
+  return digitMap[value];
+}
+
+function normalizeReferenceText(value: unknown): string {
+  return String(value ?? '').replace(/\s+/g, '').toLowerCase();
+}
+
+function buildStoredChartSummary(chart: ChartData): string {
+  const topRows = chart.data
+    .slice(0, 12)
+    .map((row) => {
+      const rawDimensionValue = row.rawDimensionValue && row.rawDimensionValue !== row.name
+        ? `raw=${row.rawDimensionValue}`
+        : '';
+      const extras = Object.entries(row)
+        .filter(([key]) => key !== 'name' && key !== 'value' && key !== 'color' && key !== 'rawDimensionValue')
+        .slice(0, 4)
+        .map(([key, value]) => `${key}=${value}`);
+      return [row.name, rawDimensionValue, `value=${row.value}`, ...extras].filter(Boolean).join('，');
+    })
+    .join('；');
+
+  return [
+    '上一轮图表 artifact：',
+    `标题：${chart.title || '未命名图表'}`,
+    chart.subtitle ? `说明：${chart.subtitle}` : '',
+    `类型：${chart.type}`,
+    topRows ? `数据：${topRows}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function buildStoredReportSummary(report: SmartReport): string {
+  const metricSummary = report.metrics
+    .slice(0, 5)
+    .map((metric) => `${metric.label}=${metric.value}`)
+    .join('；');
+  const chartSummary = report.charts
+    .slice(0, 5)
+    .map((chart, index) => {
+      const measure = chart.measures[0] || '数量';
+      const topRows = chart.data
+        .slice(0, 4)
+        .map((row) => {
+          if (chart.type === 'stackedBar') {
+            const seriesValues = chart.measures.map((item) => `${item}=${row[item] ?? 0}`).join('/');
+            return `${row[chart.dimension] ?? ''}:${seriesValues}`;
+          }
+          return `${row[chart.dimension] ?? ''}:${row[measure] ?? ''}`;
+        })
+        .filter(Boolean)
+        .join('、');
+      return `图表#${index + 1} ${chart.title}（${chart.type}，维度=${chart.dimension}，指标=${chart.measures.join('/') || measure}${topRows ? `，Top=${topRows}` : ''}）`;
+    })
+    .join('；');
+
+  return [
+    '上一轮报告 artifact：',
+    `标题：${report.title}`,
+    `样本量：${report.recordCount}`,
+    report.executiveSummary ? `报告摘要：${compactText(report.executiveSummary, 500)}` : '',
+    report.finalSummary?.summary ? `最终结论：${compactText(report.finalSummary.summary, 500)}` : '',
+    metricSummary ? `核心指标：${metricSummary}` : '',
+    chartSummary ? `图表摘要：${chartSummary}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function normalizeStoredChart(value: unknown): ChartData | undefined {
+  const raw = asRecord(value);
+  if (!raw || typeof raw.title !== 'string' || typeof raw.type !== 'string' || !Array.isArray(raw.data)) return undefined;
+  const validTypes = ['bar', 'donut', 'line', 'pie', 'stackedBar'];
+  if (!validTypes.includes(raw.type)) return undefined;
+  return raw as unknown as ChartData;
+}
+
+function normalizeStoredReport(value: unknown): SmartReport | undefined {
+  const raw = asRecord(value);
+  if (!raw || typeof raw.title !== 'string' || !Array.isArray(raw.charts) || !Array.isArray(raw.metrics)) return undefined;
+  return raw as unknown as SmartReport;
+}
+
+function normalizeStoredStringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((item) => String(item)).filter(Boolean) : [];
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' ? value as Record<string, unknown> : undefined;
 }
 
 async function loadSmartTableContexts(tableIds: string[]): Promise<SmartTableContext[]> {
@@ -2527,10 +3586,70 @@ async function loadSmartTableContexts(tableIds: string[]): Promise<SmartTableCon
   const contexts: SmartTableContext[] = [];
   for (const table of result.rows) {
     const sampleRows = await loadSampleRows(table.physical_table_name);
-    contexts.push({ ...table, sample_rows: sampleRows });
+    const valueExamples = await loadValueExamples(table, sampleRows);
+    contexts.push({ ...table, sample_rows: sampleRows, value_examples: valueExamples });
   }
 
   return contexts;
+}
+
+async function loadValueExamples(
+  table: SmartTableContextRow,
+  sampleRows: Array<Record<string, unknown>>,
+): Promise<Record<string, string[]>> {
+  const candidateFields = getValueExampleFields(table, sampleRows);
+  const examples: Record<string, string[]> = {};
+
+  for (const field of candidateFields) {
+    try {
+      const result = await pgQuery<{ value: string }>(
+        `SELECT ${quoteIdent(field)}::text AS value
+         FROM ${quoteIdent(table.physical_table_name)}
+         WHERE ${quoteIdent(field)} IS NOT NULL
+           AND TRIM(${quoteIdent(field)}::text) <> ''
+         GROUP BY ${quoteIdent(field)}
+         ORDER BY COUNT(*) DESC
+         LIMIT 40`
+      );
+      const values = result.rows.map((row) => String(row.value || '').trim()).filter(Boolean);
+      if (values.length > 0) examples[field] = values;
+    } catch {
+      // Some configured display fields may not map to physical columns. Skip them.
+    }
+  }
+
+  return examples;
+}
+
+function getValueExampleFields(table: SmartTableContextRow, sampleRows: Array<Record<string, unknown>>): string[] {
+  const sampleFields = uniqueStrings(sampleRows.flatMap((row) => Object.keys(row)));
+  const configuredFields = Array.isArray(table.columns)
+    ? table.columns.flatMap((column) => [column.name, column.sourceName, column.source_name]).map((field) => String(field || '')).filter(Boolean)
+    : [];
+  const fields = uniqueStrings([...sampleFields, ...configuredFields]);
+  const semanticKeywords = [
+    '车系',
+    '车型',
+    '车款',
+    '品牌',
+    '竞品',
+    '意图',
+    '标签',
+    '渠道',
+    '来源',
+    '情感',
+    '五级',
+    '四级',
+    '三级',
+    '二级',
+    '一级',
+    '词云',
+    '关键词',
+  ];
+
+  return fields
+    .filter((field) => semanticKeywords.some((keyword) => normalizeField(field).includes(normalizeField(keyword))))
+    .slice(0, 10);
 }
 
 async function loadSampleRows(physicalTableName: string): Promise<Array<Record<string, unknown>>> {
@@ -2549,6 +3668,8 @@ function buildTableContextPrompt(tables: SmartTableContext[]): string {
       const comment = column.comment ? `，业务含义：${column.comment}` : '';
       return `- "${displayName}" 类型：${column.type || 'string'}，源字段："${sourceName}"${comment}`;
     });
+    const valueExampleLines = Object.entries(table.value_examples || {})
+      .map(([field, values]) => `- "${field}" 常见值示例（非全量）：${values.slice(0, 40).join('、')}`);
 
     return [
       `表别名：${table.name}`,
@@ -2558,6 +3679,8 @@ function buildTableContextPrompt(tables: SmartTableContext[]): string {
       `行数：${table.row_count}`,
       `字段：`,
       columnLines.join('\n') || '- 暂无字段配置',
+      valueExampleLines.length > 0 ? `关键维度字段值示例（仅用于理解口径，不代表全量值域）：` : '',
+      valueExampleLines.join('\n'),
       `前 10 行样例 JSON：`,
       JSON.stringify(table.sample_rows, null, 2),
     ].join('\n');
@@ -2566,24 +3689,214 @@ function buildTableContextPrompt(tables: SmartTableContext[]): string {
   return `已选择智能问数表如下：\n\n${tableBlocks.join('\n\n')}`;
 }
 
-function buildHistoryMessages(history: unknown): DeepSeekMessage[] {
-  if (!Array.isArray(history) || history.length === 0) return [];
+function buildKnowledgeLookupTerms(userQuery: string, tables: SmartTableContext[]): string[] {
+  const normalizedQuery = normalizeKnowledgeText(userQuery).slice(0, 180);
+  if (normalizedQuery.length < 2) return [];
 
-  return history
-    .slice(-MAX_HISTORY_MESSAGES)
-    .filter((item): item is { role: string; content: string } => (
-      Boolean(item) &&
-      typeof item === 'object' &&
-      (item as { role?: unknown }).role === 'user' || (item as { role?: unknown }).role === 'assistant' &&
-      typeof (item as { content?: unknown }).content === 'string'
-    ))
-    .map((item) => {
-      const maxLen = item.role === 'user' ? MAX_HISTORY_USER_CHARS : MAX_HISTORY_ASSISTANT_CHARS;
-      const truncated = item.content.length > maxLen
-        ? `${item.content.slice(0, maxLen)}...[已截断]`
-        : item.content;
-      return { role: item.role as 'user' | 'assistant', content: truncated };
-    });
+  const terms: string[] = [normalizedQuery];
+  const businessTerms = [
+    '竞品分析',
+    '竞品',
+    '横向对比',
+    '对比分析',
+    '五级标签',
+    '末级标签',
+    '三级渠道',
+    '投诉量',
+    '客诉数',
+    '反馈数',
+    '投诉意图',
+    '用户词云',
+    '词云',
+    '高频词',
+    '关键词',
+    '用户原声',
+    '原声片段',
+    '车系',
+    '车型',
+    '渠道',
+    '标签',
+    '负面率',
+    '集中度',
+    '环比',
+    '同比',
+    '趋势',
+    '根因',
+    '异常点',
+  ];
+
+  for (const term of businessTerms) {
+    if (userQuery.includes(term)) terms.push(term);
+  }
+
+  for (const match of userQuery.matchAll(/(?:车系|车型)\s*([A-Za-z0-9_\-\u4e00-\u9fa5]{1,24})(?=的|在|和|与|及|、|，|,|。|；|;|\s|$)/g)) {
+    if (match[0]) terms.push(match[0]);
+    if (match[1]) terms.push(match[1]);
+  }
+
+  for (const field of getAvailableFields(tables)) {
+    const normalizedField = normalizeKnowledgeText(field);
+    if (normalizedField.length >= 2 && normalizedQuery.includes(normalizedField)) {
+      terms.push(field);
+    }
+  }
+
+  const maxLength = Math.min(normalizedQuery.length, 120);
+  for (let length = 2; length <= 8; length += 1) {
+    for (let start = 0; start <= maxLength - length; start += 1) {
+      terms.push(normalizedQuery.slice(start, start + length));
+      if (terms.length >= 700) {
+        return uniqueStrings(terms.map(normalizeKnowledgeText).filter((term) => term.length >= 2)).slice(0, 700);
+      }
+    }
+  }
+
+  return uniqueStrings(terms.map(normalizeKnowledgeText).filter((term) => term.length >= 2)).slice(0, 700);
+}
+
+async function loadRelevantKnowledge(userQuery: string, tables: SmartTableContext[]): Promise<RelevantKnowledgeItem[]> {
+  try {
+    const lookupTerms = buildKnowledgeLookupTerms(userQuery, tables);
+    if (lookupTerms.length === 0) return [];
+
+    const result = await pgQuery<KnowledgeCandidateRow>(
+      `SELECT k.id,
+              k.title,
+              k.category,
+              k.standard_term,
+              k.aliases,
+              k.keywords,
+              k.content,
+              k.field_name,
+              k.formula,
+              k.business_domain,
+              k.applicable_intents,
+              k.priority,
+              k.status,
+              COALESCE(SUM(t.weight), 0) AS term_score,
+              COALESCE(jsonb_agg(DISTINCT t.term) FILTER (WHERE t.term IS NOT NULL), '[]'::jsonb) AS matched_terms
+       FROM knowledge_item_terms t
+       INNER JOIN knowledge_items k ON k.id = t.item_id
+       WHERE k.status = 'active'
+         AND t.normalized_term = ANY($1::text[])
+       GROUP BY k.id
+       ORDER BY term_score DESC, k.priority DESC, k.updated_at DESC NULLS LAST, k.created_at DESC
+       LIMIT $2`,
+      [lookupTerms, MAX_KNOWLEDGE_CANDIDATES]
+    );
+
+    const fields = getAvailableFields(tables);
+    return result.rows
+      .map((row) => {
+        const item = normalizeKnowledgeRow(row);
+        return { ...item, score: scoreKnowledgeItem(item, userQuery, fields) };
+      })
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score || b.priority - a.priority)
+      .slice(0, MAX_RELEVANT_KNOWLEDGE);
+  } catch {
+    return [];
+  }
+}
+
+function normalizeKnowledgeRow(row: KnowledgeItemRow | KnowledgeCandidateRow): RelevantKnowledgeItem {
+  return {
+    id: row.id,
+    title: row.title,
+    category: row.category,
+    standardTerm: row.standard_term || '',
+    aliases: normalizeKnowledgeStringList(row.aliases),
+    keywords: normalizeKnowledgeStringList(row.keywords),
+    content: row.content,
+    fieldName: row.field_name || '',
+    formula: row.formula || '',
+    priority: Number(row.priority || 50),
+    termScore: Number('term_score' in row ? row.term_score : 0),
+    matchedTerms: normalizeKnowledgeStringList('matched_terms' in row ? row.matched_terms : []),
+    score: 0,
+  };
+}
+
+function scoreKnowledgeItem(item: RelevantKnowledgeItem, userQuery: string, fields: string[]): number {
+  const queryText = normalizeKnowledgeText(userQuery);
+  const matchTexts = uniqueStrings([
+    item.title,
+    item.standardTerm,
+    item.fieldName,
+    ...item.aliases,
+    ...item.keywords,
+  ].filter(Boolean));
+  let lexicalScore = 0;
+
+  for (const text of matchTexts) {
+    const normalized = normalizeKnowledgeText(text);
+    if (!normalized || normalized.length < 2) continue;
+    if (queryText.includes(normalized)) lexicalScore += 24;
+    if (normalized.includes(queryText) && queryText.length >= 2) lexicalScore += 8;
+  }
+
+  let score = item.termScore * 10 + lexicalScore;
+  if (score <= 0) return 0;
+
+  if (item.category === 'scenario' && /报告|分析|竞品|对比|根因|趋势|异常/.test(userQuery)) score += 4;
+  if (item.category === 'metric' && /率|占比|数量|多少|集中度|环比|同比|top|Top|TOP/.test(userQuery)) score += 3;
+  if (item.category === 'field_mapping' && /字段|维度|分布|词云|标签|渠道|意图/.test(userQuery)) score += 3;
+  if (item.fieldName && fields.some((field) => normalizeField(field) === normalizeField(item.fieldName))) score += 2;
+
+  return score + Math.min(Math.max(item.priority, 0), 100) / 25;
+}
+
+function buildBusinessKnowledgePrompt(items: RelevantKnowledgeItem[]): string {
+  if (items.length === 0) return '';
+
+  const lines = items.map((item, index) => {
+    const parts = [
+      `${index + 1}. [${formatKnowledgeCategory(item.category)}] ${item.title}`,
+      item.standardTerm ? `标准词=${item.standardTerm}` : '',
+      item.fieldName ? `字段=${item.fieldName}` : '',
+      item.aliases.length > 0 ? `别名=${item.aliases.slice(0, 8).join('/')}` : '',
+      item.keywords.length > 0 ? `关键词=${item.keywords.slice(0, 8).join('/')}` : '',
+      item.matchedTerms.length > 0 ? `命中词=${item.matchedTerms.slice(0, 6).join('/')}` : '',
+      item.formula ? `口径=${item.formula}` : '',
+      `规则=${compactText(item.content, 220)}`,
+    ].filter(Boolean);
+    return parts.join('；');
+  });
+
+  return [
+    '知识中心命中语义（必须优先遵守，用于理解业务语言、字段映射、指标口径和场景规则；若与真实字段冲突，以当前数据表字段为准）：',
+    ...lines,
+  ].join('\n');
+}
+
+function formatKnowledgeCategory(category: string): string {
+  const labels: Record<string, string> = {
+    concept: '业务概念',
+    synonym: '同义词',
+    field_mapping: '字段映射',
+    metric: '指标口径',
+    scenario: '场景规则',
+    example: '语料案例',
+    rule: '推理规则',
+  };
+  return labels[category] || category;
+}
+
+function normalizeKnowledgeStringList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean);
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (Array.isArray(parsed)) return parsed.map((item) => String(item).trim()).filter(Boolean);
+    } catch {
+      return value.split(/[,，、\n]/).map((item) => item.trim()).filter(Boolean);
+    }
+  }
+  return [];
+}
+
+function normalizeKnowledgeText(value: unknown): string {
+  return String(value ?? '').replace(/\s+/g, '').toLowerCase();
 }
 
 async function shouldEnableReasoningForFollowUp(userQuery: string, historyMessages: DeepSeekMessage[]): Promise<boolean> {
@@ -2632,14 +3945,17 @@ function buildAnswerPrompt({
   sql,
   rows,
   tables,
+  businessKnowledgePrompt,
 }: {
   userQuery: string;
   sql: string;
   rows: Array<Record<string, unknown>>;
   tables: SmartTableContext[];
+  businessKnowledgePrompt: string;
 }): string {
   const stats = summarizeQueryRows(rows);
   return [
+    businessKnowledgePrompt,
     `用户问题：${userQuery}`,
     `已选表：${tables.map((table) => `${table.name}("${table.physical_table_name}")`).join('、')}`,
     `已执行 SQL：\n${sql}`,
@@ -2685,10 +4001,12 @@ async function generateFollowUps({
   userQuery,
   answer,
   tables,
+  businessKnowledgePrompt,
 }: {
   userQuery: string;
   answer: string;
   tables: SmartTableContext[];
+  businessKnowledgePrompt: string;
 }): Promise<{ followUps: string[]; usage: DeepSeekUsage | null }> {
   try {
     const { content: text, usage } = await callDeepSeek(
@@ -2698,6 +4016,7 @@ async function generateFollowUps({
           role: 'user',
           content: [
             buildTableContextPrompt(tables),
+            businessKnowledgePrompt,
             `用户问题：${userQuery}`,
             `当前回答：${answer}`,
           ].join('\n\n'),
