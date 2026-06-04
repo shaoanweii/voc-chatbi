@@ -171,6 +171,13 @@ function renderPieLabel(props: PieLabelProps) {
 export function ChartCard({ data }: ChartCardProps) {
   const [displayType, setDisplayType] = useState<ChartDisplayType>(() => normalizeInitialChartType(data.type));
   const availableTypes = useMemo(() => getAvailableChartTypes(data), [data]);
+  const summaryText = useMemo(() => {
+    const summary = data.summary;
+    if (!summary) return '';
+    const totalText = `完整总量 ${summary.totalValue.toLocaleString()}，共 ${summary.totalGroups.toLocaleString()} 个维度`;
+    if (!summary.isTruncated) return totalText;
+    return `${totalText}；当前图表展示 ${summary.displayedGroups.toLocaleString()} 个维度，展示合计 ${summary.displayedValue.toLocaleString()}，未展开 ${summary.hiddenGroups.toLocaleString()} 个维度合计 ${summary.hiddenValue.toLocaleString()}`;
+  }, [data.summary]);
 
   useEffect(() => {
     const nextType = normalizeInitialChartType(data.type);
@@ -475,6 +482,9 @@ export function ChartCard({ data }: ChartCardProps) {
         <div>
           <h3 className="text-base font-extrabold text-slate-950 mb-1">{data.title}</h3>
           <p className="text-xs text-slate-400">{data.subtitle}</p>
+          {summaryText && (
+            <p className="mt-1 text-xs font-medium text-slate-500">{summaryText}</p>
+          )}
         </div>
         {availableTypes.length > 1 && (
           <div className="flex shrink-0 items-center gap-1 rounded-full border border-slate-200/80 bg-white/85 p-1 shadow-sm">

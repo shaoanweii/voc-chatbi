@@ -20,6 +20,7 @@ export interface ChartData {
   type: 'bar' | 'donut' | 'line' | 'pie' | 'stackedBar';
   data: ChartDataItem[];
   series?: string[];
+  summary?: ChartDataSummary;
 }
 
 export interface ChartDataItem {
@@ -27,6 +28,18 @@ export interface ChartDataItem {
   value: number;
   color: string;
   [key: string]: string | number;
+}
+
+export interface ChartDataSummary {
+  totalValue: number;
+  displayedValue: number;
+  hiddenValue: number;
+  totalGroups: number;
+  displayedGroups: number;
+  hiddenGroups: number;
+  isTruncated: boolean;
+  dimensionName?: string;
+  measureName?: string;
 }
 
 export interface ConversationState {

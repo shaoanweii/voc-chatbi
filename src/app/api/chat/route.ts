@@ -926,7 +926,7 @@ function buildChartDataFromRows(
   rows: Array<Record<string, unknown>>,
   chartSpec: ChartSpec | undefined,
   userQuery: string,
-): { title: string; subtitle: string; type: 'bar' | 'line' | 'donut' | 'pie' | 'stackedBar'; data: Array<{ name: string; value: number; color: string; [key: string]: string | number }>; series?: string[] } {
+): ChartData {
   const COLORS = ['#9adcc3', '#83a7ee', '#b69aef', '#83cbdf', '#e4b494', '#f0d4c3', '#d9c6f8', '#bde5f0'];
   const title = chartSpec?.title || '数据分析图表';
   const chartType = chartSpec?.type || 'bar';
@@ -947,10 +947,10 @@ function buildChartDataFromRows(
 
     const seriesLabels = seriesKeys.length > 0 ? seriesKeys : ['数量'];
 
-    const data = rows.slice(0, 15).map((row, index) => {
+    const allData: ChartData['data'] = rows.map((row, index) => {
       const rawName = row[dimKey];
       const name = formatChartLabel(String(rawName ?? `项${index + 1}`), chartSpec?.dimension || '');
-      const entries: Record<string, string | number> = {
+      const entries: ChartData['data'][number] = {
         name,
         value: 0,
         color: COLORS[index % COLORS.length],
@@ -966,10 +966,18 @@ function buildChartDataFromRows(
       entries.value = total;
       return entries;
     });
+    const data = allData.slice(0, 15);
 
     const subtitle = measure || `${dimKey} × ${seriesLabels.join(' / ')}`;
 
-    return { title, subtitle, type: 'stackedBar', data: data as Array<{ name: string; value: number; color: string; [key: string]: string | number }>, series: seriesLabels };
+    return {
+      title,
+      subtitle,
+      type: 'stackedBar',
+      data,
+      series: seriesLabels,
+      summary: buildChartDataSummary(allData, data, dimKey, measure || seriesLabels.join(' / ')),
+    };
   }
 
   const valKey = keys.length > 1
@@ -979,7 +987,7 @@ function buildChartDataFromRows(
       }) || keys[1])
     : keys[0];
 
-  const rawData = rows.slice(0, 30).map((row, index) => {
+  const rawData = rows.map((row, index) => {
     const rawName = row[dimKey];
     const name = formatChartLabel(String(rawName ?? `项${index + 1}`), chartSpec?.dimension || '');
     const rawValue = row[valKey];
@@ -988,14 +996,53 @@ function buildChartDataFromRows(
   });
 
   const isProportionChart = chartType === 'pie' || chartType === 'donut';
-  const data = isProportionChart ? topNWithOther(rawData, 10) : rawData;
+  const data = isProportionChart ? topNWithOther(rawData, 10) : rawData.slice(0, 30);
+  const hiddenDetailValue = isProportionChart
+    ? [...rawData].sort((a, b) => b.value - a.value).slice(10).reduce((sum, item) => sum + item.value, 0)
+    : undefined;
+  const hiddenDetailGroups = isProportionChart ? Math.max(rawData.length - 10, 0) : undefined;
 
   const subtitle = measure || `${dimKey} × ${valKey}`;
 
-  return { title, subtitle, type: chartType, data };
+  return {
+    title,
+    subtitle,
+    type: chartType,
+    data,
+    summary: buildChartDataSummary(rawData, data, dimKey, String(valKey || measure || '数量'), {
+      hiddenValue: hiddenDetailValue,
+      hiddenGroups: hiddenDetailGroups,
+    }),
+  };
 }
 
 type ChartDataPoint = { name: string; value: number; color: string };
+
+function buildChartDataSummary(
+  allData: Array<{ value: number }>,
+  displayedData: Array<{ value: number }>,
+  dimensionName: string,
+  measureName: string,
+  options: { hiddenValue?: number; hiddenGroups?: number } = {},
+): NonNullable<ChartData['summary']> {
+  const totalValue = allData.reduce((sum, item) => sum + (Number(item.value) || 0), 0);
+  const displayedValue = displayedData.reduce((sum, item) => sum + (Number(item.value) || 0), 0);
+  const totalGroups = allData.length;
+  const displayedGroups = displayedData.length;
+  const hiddenGroups = options.hiddenGroups ?? Math.max(totalGroups - displayedGroups, 0);
+
+  return {
+    totalValue,
+    displayedValue,
+    hiddenValue: options.hiddenValue ?? Math.max(totalValue - displayedValue, 0),
+    totalGroups,
+    displayedGroups,
+    hiddenGroups,
+    isTruncated: hiddenGroups > 0,
+    dimensionName,
+    measureName,
+  };
+}
 
 function topNWithOther(data: ChartDataPoint[], n: number): ChartDataPoint[] {
   if (data.length <= n) return data;
@@ -1008,18 +1055,27 @@ function topNWithOther(data: ChartDataPoint[], n: number): ChartDataPoint[] {
   return top;
 }
 
-function computeChartStats(chartData: { title: string; type: string; data: ChartDataPoint[] }): string {
+function computeChartStats(chartData: Pick<ChartData, 'title' | 'type' | 'data' | 'summary'>): string {
   const { data } = chartData;
   if (!data || data.length === 0) return '无数据';
 
-  const total = data.reduce((sum, d) => sum + (d.value || 0), 0);
-  const count = data.length;
+  const summary = chartData.summary;
+  const total = summary?.totalValue ?? data.reduce((sum, d) => sum + (d.value || 0), 0);
+  const count = summary?.totalGroups ?? data.length;
+  const displayedValue = summary?.displayedValue ?? data.reduce((sum, d) => sum + (d.value || 0), 0);
+  const displayedGroups = summary?.displayedGroups ?? data.length;
+  const hiddenValue = summary?.hiddenValue ?? Math.max(total - displayedValue, 0);
+  const hiddenGroups = summary?.hiddenGroups ?? Math.max(count - displayedGroups, 0);
   const sorted = [...data].sort((a, b) => (b.value || 0) - (a.value || 0));
   const maxVal = sorted[0]?.value || 0;
 
   const parts = [
-    `共 **${count}** 个维度，总量 **${total.toLocaleString()}**，最高 **${maxVal.toLocaleString()}**（Top1 占 **${total > 0 ? ((maxVal / total) * 100).toFixed(1) : '0'}%**）`,
+    `完整 SQL 查询结果共 **${count}** 个维度，总量 **${total.toLocaleString()}**，最高 **${maxVal.toLocaleString()}**（Top1 占完整总量 **${total > 0 ? ((maxVal / total) * 100).toFixed(1) : '0'}%**）`,
   ];
+
+  if (summary?.isTruncated) {
+    parts.push(`图表仅展示 **${displayedGroups}** 个维度，展示合计 **${displayedValue.toLocaleString()}**；未展开 **${hiddenGroups}** 个维度，合计 **${hiddenValue.toLocaleString()}**。数据全貌和占比必须以完整总量 **${total.toLocaleString()}** 为准。`);
+  }
 
   const topN = sorted.slice(0, 5);
   topN.forEach((d, i) => {
@@ -1030,7 +1086,7 @@ function computeChartStats(chartData: { title: string; type: string; data: Chart
   const top3Sum = topN.slice(0, 3).reduce((s, d) => s + (d.value || 0), 0);
   const top3Pct = total > 0 ? ((top3Sum / total) * 100).toFixed(1) : '0';
   if (topN.length >= 3) {
-    parts.push(`Top3 集中度：**${top3Pct}%**（前 3 项合计占总量 ${top3Pct}%）`);
+    parts.push(`Top3 集中度：**${top3Pct}%**（前 3 项合计占完整总量 ${top3Pct}%）`);
   }
 
   return parts.join('\n');
@@ -1058,7 +1114,7 @@ const CHART_ANALYSIS_SYSTEM_PROMPT = `你是「VOC 智能问数」的数据分�
 async function generateChartAnalysis(
   userQuery: string,
   sql: string,
-  chartData: { title: string; type: string; data: ChartDataPoint[] },
+  chartData: Pick<ChartData, 'title' | 'type' | 'data' | 'summary'>,
   chartSpec: ChartSpec | undefined,
   reasoningEnabled: boolean,
   businessKnowledgePrompt: string,
@@ -1073,7 +1129,7 @@ async function generateChartAnalysis(
 数据统计摘要：
 ${dataSummary}
 
-请基于以上统计摘要，按格式输出：数据全貌（1句）→ Top3 核心发现（每条加粗标题+2-3句）→ 行动建议（1条）。每条发现整段不超过 80 字，关键数字用 ** 加粗。`;
+请基于以上统计摘要，按格式输出：数据全貌（1句）→ Top3 核心发现（每条加粗标题+2-3句）→ 行动建议（1条）。数据全貌必须使用完整 SQL 查询总量，不允许使用图表截断后的展示合计作为总量。每条发现整段不超过 80 字，关键数字用 ** 加粗。`;
 
   const { content: answer, usage } = await callDeepSeek(
     [
@@ -1087,7 +1143,7 @@ ${dataSummary}
 }
 
 function buildFallbackChartAnalysis(
-  chartData: { title: string; type: string; data: Array<{ name: string; value: number }> },
+  chartData: Pick<ChartData, 'title' | 'type' | 'data' | 'summary'>,
   totalRows: number,
 ): string {
   if (!chartData.data || chartData.data.length === 0) {
@@ -1101,11 +1157,16 @@ function buildFallbackChartAnalysis(
   const minItem = chartData.data.reduce((a, b) => (a.value < b.value ? a : b));
   const avg = Math.round(values.reduce((s, v) => s + v, 0) / values.length);
   const chartTypeLabel = chartData.type === 'pie' || chartData.type === 'donut' ? '占比' : '分布';
+  const summary = chartData.summary;
+  const totalValue = summary?.totalValue ?? values.reduce((sum, value) => sum + value, 0);
+  const overview = summary
+    ? `完整查询共 ${summary.totalGroups} 个维度，总量 ${summary.totalValue}；图表展示 ${summary.displayedGroups} 个维度，展示合计 ${summary.displayedValue}${summary.isTruncated ? `，其余 ${summary.hiddenGroups} 个维度合计 ${summary.hiddenValue}` : ''}。`
+    : `共查询到 ${totalRows} 条记录。`;
 
-  return `共查询到 ${totalRows} 条记录，${chartData.title}的${chartTypeLabel}情况如下：
+  return `${overview}${chartData.title}的${chartTypeLabel}情况如下：
 - 最高值：${maxItem.name}（${maxItem.value}），最低值：${minItem.name}（${minItem.value}）
 - 平均值：${avg}
-- 共涉及 ${chartData.data.length} 个${chartData.type === 'pie' || chartData.type === 'donut' ? '分类' : '维度'}
+- 完整总量口径：${totalValue}
 以上结论由系统基于查询结果自动生成，仅供参考。`;
 }
 
@@ -3492,6 +3553,9 @@ function normalizeReferenceText(value: unknown): string {
 }
 
 function buildStoredChartSummary(chart: ChartData): string {
+  const summary = chart.summary
+    ? `完整总量=${chart.summary.totalValue}，完整维度=${chart.summary.totalGroups}，展示合计=${chart.summary.displayedValue}，展示维度=${chart.summary.displayedGroups}${chart.summary.isTruncated ? `，未展示合计=${chart.summary.hiddenValue}，未展示维度=${chart.summary.hiddenGroups}` : ''}`
+    : '';
   const topRows = chart.data
     .slice(0, 12)
     .map((row) => {
@@ -3511,6 +3575,7 @@ function buildStoredChartSummary(chart: ChartData): string {
     `标题：${chart.title || '未命名图表'}`,
     chart.subtitle ? `说明：${chart.subtitle}` : '',
     `类型：${chart.type}`,
+    summary ? `总量口径：${summary}` : '',
     topRows ? `数据：${topRows}` : '',
   ].filter(Boolean).join('\n');
 }
