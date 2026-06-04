@@ -655,6 +655,15 @@ function tableToPieChart(table: SmartReportTable): SmartReportChart | undefined 
   const dimension = table.columns.find((column) => !/占比|数量|次数|记录数/.test(column)) || table.columns[0];
   const measure = table.columns.find((column) => /数量|次数|记录数/.test(column)) || table.columns[1];
   if (!dimension || !measure || table.rows.length === 0) return undefined;
+  const fullData = table.rows.map((row) => ({
+    [dimension]: String(row[dimension] ?? ''),
+    [measure]: Number(row[measure] ?? 0),
+    占比: parsePercent(row['占比']),
+  }));
+  const data = fullData.slice(0, 12);
+  const totalValue = fullData.reduce((sum, row) => sum + Number(row[measure] || 0), 0);
+  const displayedValue = data.reduce((sum, row) => sum + Number(row[measure] || 0), 0);
+  const hiddenGroups = Math.max(fullData.length - data.length, 0);
 
   return {
     id: `${table.id}_chart`,
@@ -663,11 +672,18 @@ function tableToPieChart(table: SmartReportTable): SmartReportChart | undefined 
     type: 'pie',
     dimension,
     measures: [measure],
-    data: table.rows.slice(0, 12).map((row) => ({
-      [dimension]: String(row[dimension] ?? ''),
-      [measure]: Number(row[measure] ?? 0),
-      占比: parsePercent(row['占比']),
-    })),
+    data,
+    summary: {
+      totalValue,
+      displayedValue,
+      hiddenValue: Math.max(totalValue - displayedValue, 0),
+      totalGroups: fullData.length,
+      displayedGroups: data.length,
+      hiddenGroups,
+      isTruncated: hiddenGroups > 0,
+      dimensionName: dimension,
+      measureName: measure,
+    },
   };
 }
 
@@ -697,6 +713,14 @@ function buildChartSectionTitle(chart: SmartReportChart): string {
   if (/时间|日期|月份|趋势/.test(dimension) || /时间|日期|月份|趋势/.test(title)) return '问题时间趋势';
   if (/渠道|场景|来源/.test(dimension) || /渠道|场景|来源/.test(title)) return `${shortDimensionName(dimension || title)}分布`;
   return title || `${dimension}分布`;
+}
+
+function buildReportChartSummaryText(chart: SmartReportChart): string {
+  const summary = chart.summary;
+  if (!summary) return '';
+  const totalText = `完整总量 ${summary.totalValue.toLocaleString()}，共 ${summary.totalGroups.toLocaleString()} 个维度`;
+  if (!summary.isTruncated) return totalText;
+  return `${totalText}；当前展示 ${summary.displayedGroups.toLocaleString()} 个维度，展示合计 ${summary.displayedValue.toLocaleString()}，未展开 ${summary.hiddenGroups.toLocaleString()} 个维度合计 ${summary.hiddenValue.toLocaleString()}`;
 }
 
 function shortDimensionName(value: unknown): string {
@@ -747,6 +771,7 @@ function ReportChartCard({ chart, order }: { chart: SmartReportChart; order?: st
 
   const dimension = chart.dimension;
   const measure = chart.measures[0] || '数量';
+  const summaryText = buildReportChartSummaryText(chart);
   const stackedMeasures = chart.measures.filter((item) => item && item !== '总计' && item !== '占比');
   const stackedSeries = stackedMeasures.length > 0 ? stackedMeasures : [measure];
   const renderAxisTick = ({ x, y, payload }: { x: number; y: number; payload: { value: string } }) => (
@@ -761,6 +786,7 @@ function ReportChartCard({ chart, order }: { chart: SmartReportChart; order?: st
         <div>
           <SectionTitle order={order || ''} title={buildChartSectionTitle(chart)} icon={<BarChart3Icon className="h-4 w-4 text-blue-500" />} />
           {chart.subtitle && <div className="mt-1 text-xs text-[#009999]">{chart.subtitle}</div>}
+          {summaryText && <div className="mt-1 text-xs font-medium text-[#5f6b7a]">{summaryText}</div>}
         </div>
         {availableTypes.length > 1 && (
           <div className="flex shrink-0 items-center gap-1 rounded-full border border-white/70 bg-white/80 p-1 shadow-sm">
@@ -848,7 +874,7 @@ function ReportChartCard({ chart, order }: { chart: SmartReportChart; order?: st
               <PieChart>
                 <Tooltip
                   formatter={(value: number, name: string) => {
-                    const total = chart.data.reduce((sum, d) => {
+                    const total = chart.summary?.totalValue ?? chart.data.reduce((sum, d) => {
                       const v = d[measure];
                       return sum + (typeof v === 'number' ? v : 0);
                     }, 0);
@@ -879,7 +905,7 @@ function ReportChartCard({ chart, order }: { chart: SmartReportChart; order?: st
                 const name = String(entry[dimension] ?? '');
                 const val = entry[measure];
                 const displayVal = typeof val === 'number' ? val.toLocaleString() : String(val ?? '');
-                const total = chart.data.reduce((sum, d) => {
+                const total = chart.summary?.totalValue ?? chart.data.reduce((sum, d) => {
                   const v = d[measure];
                   return sum + (typeof v === 'number' ? v : 0);
                 }, 0);

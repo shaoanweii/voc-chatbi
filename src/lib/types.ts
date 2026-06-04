@@ -73,6 +73,7 @@ export interface SmartReportChart {
   dimension: string;
   measures: string[];
   data: Array<Record<string, string | number>>;
+  summary?: ChartDataSummary;
 }
 
 export interface SmartReportTable {

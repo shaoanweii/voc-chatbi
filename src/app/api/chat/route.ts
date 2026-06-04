@@ -54,6 +54,7 @@ const PLANNER_SYSTEM_PROMPT = `你是「VOC 智能问数」的 SQL 规划器。
 8. simple_query 和 chart 意图的 SQL 必须显式包含 LIMIT ${DEFAULT_REPORT_SQL_LIMIT}；如果用户指定了更小的 TopN/limit，则使用用户指定值。
 9. 表上下文中的前 10 行样例和字段值示例只用于理解字段含义，不代表全量数据值域。禁止因为样例里没有出现某个车系、车型、标签、渠道或意图值，就判断该值“不存在”。用户给出具体业务值时，应生成 SQL 去验证和筛选；只有 SQL 执行结果为空时，才能说明未查询到数据。
 10. 用户要求“报告、竞品分析、围绕多个维度、词云、分布”等综合分析时，即使样例中没有出现用户点名的车系/车型，也应优先归类为 report 并生成查询计划，不要直接 clarify。
+11. 多轮上下文只用于理解用户引用，不得默认继承上一轮 WHERE 条件。只有用户明确说“刚才/上面/这些/其中/沿用/继续/基于/只看/展开/那...呢/按...继续”等承接表达时，才允许把上一轮筛选条件并入 SQL。若用户提出完整的新问题（如“渠道分布”“车型分布”“投诉意图分布”“生成渠道分析报告”），即使同一会话有历史 artifact，也必须作为独立查询，不要自动 AND 上一轮条件。
 
 === 意图识别基础原则 ===
 基于用户输入的自然语言，判断需要返回数据样例对应的意图。
@@ -167,6 +168,9 @@ report 负例：
   "intent": "simple_query" | "chart" | "report" | "clarify",
   "sql": "SELECT ...",
   "reason": "一句话说明判别理由",
+  "isFollowUp": true,
+  "inheritFilters": false,
+  "inheritReason": "是否继承上一轮筛选条件的原因；完整新问题默认不继承",
   "chart_spec": {
     "title": "图表标题",
     "type": "bar" | "line" | "donut" | "pie" | "stackedBar",
@@ -227,6 +231,7 @@ const REPORT_PLANNER_SYSTEM_PROMPT = `你是「VOC 智能问数」的智能报�
 12. 用户点名多个车系/车型做竞品分析时，必须保留这些点名对象作为筛选条件或分组条件，不能因为样例未覆盖而要求用户重新指定。
 13. 用户点名多个车系/车型进行竞品分析，并要求围绕同一维度（如五级标签、三级渠道、意图、月份）对比时，禁止为每个车系/车型分别生成两张相同类型图表；必须生成一张 stackedBar 多系列对比图。dimension 使用被分析维度（如五级标签/三级渠道），seriesField 使用车系/车型字段，series 填用户点名对象（如 ["车系A", "车系B"]）。
 14. 多车系/车型对比 SQL 必须保留 seriesField 和 dimension 两类字段；可返回原始明细让系统聚合，也可 GROUP BY seriesField + dimension 并输出数量。不要只按单个车系拆成多段独立图表。
+15. 多轮上下文只用于理解用户引用，不得默认继承上一轮 WHERE 条件。只有用户明确说“刚才/上面/这些/其中/沿用/继续/基于/只看/展开/那...呢/按...继续”等承接表达时，才允许把上一轮筛选条件并入报告 SQL。若用户提出完整的新报告需求或新维度分析（如“渠道分布报告”“看一下渠道分布”），必须作为独立查询，不要自动 AND 上一轮条件。
 
 只输出 JSON，不要 Markdown，不要解释。JSON 格式：
 {
@@ -257,6 +262,7 @@ const REPORT_WRITER_SYSTEM_PROMPT = `你是一个从业20年的汽车行业数�
 - 只进行数据驱动的业务分析，不要对系统/工具本身做带有价值的评判。
 - 分析结论应聚焦于业务洞察（如"用户期待某车型投诉集中"、"用户期待在某渠道负面反馈上升"、"用户期待产品增加什么功能和配置"），而非系统用途评价。
 - 保持正向、专业的分析态度，结论应具有建设性。
+- 图表可能只展示 TopN。若 charts[].summary 存在，样本总量、占比、集中度、数据全貌必须以 summary.totalValue 和 summary.totalGroups 为准；topData 仅代表展示项，禁止把 topData 合计当作完整总量。
 
 字段语义：
 - executiveSummary：报告头部的全文摘要，在图表之前展示。应概括整体数据轮廓（样本量、时间范围、核心主题），让读者30秒内了解报告全貌。100-180字。
@@ -359,6 +365,9 @@ interface SqlPlan {
   intent: 'simple_query' | 'chart' | 'report' | 'clarify';
   sql?: string;
   reason?: string;
+  isFollowUp?: boolean;
+  inheritFilters?: boolean;
+  inheritReason?: string;
   clarifying_question?: string;
   chart_spec?: ChartSpec;
 }
@@ -498,6 +507,13 @@ interface ConversationContext {
   artifactSummary: string;
 }
 
+interface ContextInheritancePolicy {
+  hasContext: boolean;
+  allowFilterInheritance: boolean;
+  isFollowUp: boolean;
+  reason: string;
+}
+
 interface KnowledgeItemRow extends QueryResultRow {
   id: string;
   title: string;
@@ -587,11 +603,13 @@ export async function POST(request: NextRequest) {
     });
 
     const tableContext = buildTableContextPrompt(tables);
-    const contextMessages = buildConversationContextMessages(conversationContext, query);
+    const inheritancePolicy = buildContextInheritancePolicy(query, conversationContext);
+    const contextMessages = buildConversationContextMessages(conversationContext, query, inheritancePolicy);
     const reasoningEnabled = isReasoning === true || await shouldEnableReasoningForFollowUp(query, contextMessages);
     const plannerPrompt = [
       tableContext,
       businessKnowledgePrompt,
+      buildContextPolicyPrompt(inheritancePolicy),
       `用户问题：${query}`,
     ].filter(Boolean).join('\n\n');
 
@@ -609,8 +627,10 @@ export async function POST(request: NextRequest) {
     );
 
     let plan = parseSqlPlanOrFallback(planText, query);
+    plan = applyContextInheritancePolicyToPlan(plan, inheritancePolicy);
     if (shouldSuppressSampleBasedClarify(plan, query)) {
       plan = createFallbackSqlReportPlan(query, tables);
+      plan = applyContextInheritancePolicyToPlan(plan, inheritancePolicy);
     }
     if (plan.intent === 'report') {
       return streamSmartReportResponse({
@@ -685,6 +705,11 @@ export async function POST(request: NextRequest) {
         intent: 'simple_query',
         rowCount: queryRows.length,
         physicalTables: tables.map((table) => table.physical_table_name),
+        contextInheritance: {
+          isFollowUp: plan.isFollowUp,
+          inheritFilters: plan.inheritFilters,
+          reason: plan.inheritReason,
+        },
         followUps,
         tokenUsage:
           planUsage || answerUsage || followUpsUsage
@@ -708,6 +733,11 @@ export async function POST(request: NextRequest) {
       metadata: {
         rowCount: queryRows.length,
         physicalTables: tables.map((table) => table.physical_table_name),
+        contextInheritance: {
+          isFollowUp: plan.isFollowUp,
+          inheritFilters: plan.inheritFilters,
+          reason: plan.inheritReason,
+        },
         followUps,
       },
     });
@@ -816,6 +846,11 @@ function streamChartResponse({
           metadata: {
             intent: 'chart',
             chart: chartData,
+            contextInheritance: {
+              isFollowUp: intentPlan.isFollowUp,
+              inheritFilters: intentPlan.inheritFilters,
+              reason: intentPlan.inheritReason,
+            },
             followUps,
             tokenUsage:
               chartAnalysisUsage || followUpsUsage
@@ -842,6 +877,11 @@ function streamChartResponse({
           metadata: {
             chartSpec,
             rowCount: queryRows.length,
+            contextInheritance: {
+              isFollowUp: intentPlan.isFollowUp,
+              inheritFilters: intentPlan.inheritFilters,
+              reason: intentPlan.inheritReason,
+            },
             followUps,
           },
         });
@@ -1229,7 +1269,15 @@ function streamSmartReportResponse({
             thinking: reportResult.thinking,
             sqlText: reportResult.sql,
             sources: sourceNames,
-            metadata: { intent: 'report', tokenUsage: reportResult.tokenUsage },
+            metadata: {
+              intent: 'report',
+              contextInheritance: {
+                isFollowUp: intentPlan.isFollowUp,
+                inheritFilters: intentPlan.inheritFilters,
+                reason: intentPlan.inheritReason,
+              },
+              tokenUsage: reportResult.tokenUsage,
+            },
           });
           send({
             content: reportResult.content,
@@ -1255,6 +1303,11 @@ function streamSmartReportResponse({
             report: reportResult.report,
             reportPlan: reportResult.plan,
             pythonCode: reportResult.pythonCode,
+            contextInheritance: {
+              isFollowUp: intentPlan.isFollowUp,
+              inheritFilters: intentPlan.inheritFilters,
+              reason: intentPlan.inheritReason,
+            },
             followUps: reportResult.followUps,
             tokenUsage: reportResult.tokenUsage,
           },
@@ -1273,6 +1326,11 @@ function streamSmartReportResponse({
           metadata: {
             reportPlan: reportResult.plan,
             pythonCode: reportResult.pythonCode,
+            contextInheritance: {
+              isFollowUp: intentPlan.isFollowUp,
+              inheritFilters: intentPlan.inheritFilters,
+              reason: intentPlan.inheritReason,
+            },
             followUps: reportResult.followUps,
             recordCount: reportResult.report?.recordCount,
           },
@@ -1759,7 +1817,8 @@ function buildComparisonCharts(
 
   return dimensions
     .map((dimension): SmartReportChart | undefined => {
-      const data = buildStackedDistributionRows(rows, dimension, seriesContext.field, seriesContext.values, limit);
+      const fullData = buildStackedDistributionRows(rows, dimension, seriesContext.field, seriesContext.values, Number.MAX_SAFE_INTEGER);
+      const data = fullData.slice(0, limit);
       if (data.length === 0) return undefined;
 
       return {
@@ -1770,6 +1829,7 @@ function buildComparisonCharts(
         dimension,
         measures: seriesContext.values,
         data,
+        summary: buildReportChartSummary(fullData, data, dimension, '总计'),
       };
     })
     .filter(isDefined)
@@ -1876,6 +1936,44 @@ function buildStackedDistributionRows(
     .slice(0, limit);
 }
 
+function buildReportChartSummary(
+  fullRows: Array<Record<string, string | number>>,
+  displayedRows: Array<Record<string, string | number>>,
+  dimensionName: string,
+  measureName: string,
+): NonNullable<SmartReportChart['summary']> {
+  const readValue = (row: Record<string, string | number>) => {
+    const explicit = Number(row[measureName]);
+    if (Number.isFinite(explicit)) return explicit;
+    const total = Number(row['总计']);
+    if (Number.isFinite(total)) return total;
+    return Object.entries(row)
+      .filter(([key]) => key !== dimensionName && key !== '占比')
+      .reduce((sum, [, value]) => {
+        const numeric = Number(value);
+        return Number.isFinite(numeric) ? sum + numeric : sum;
+      }, 0);
+  };
+
+  const totalValue = fullRows.reduce((sum, row) => sum + readValue(row), 0);
+  const displayedValue = displayedRows.reduce((sum, row) => sum + readValue(row), 0);
+  const totalGroups = fullRows.length;
+  const displayedGroups = displayedRows.length;
+  const hiddenGroups = Math.max(totalGroups - displayedGroups, 0);
+
+  return {
+    totalValue,
+    displayedValue,
+    hiddenValue: Math.max(totalValue - displayedValue, 0),
+    totalGroups,
+    displayedGroups,
+    hiddenGroups,
+    isTruncated: hiddenGroups > 0,
+    dimensionName,
+    measureName,
+  };
+}
+
 function findCountWeightField(rows: Array<Record<string, unknown>>, dimension: string, seriesField: string): string | undefined {
   const firstRow = rows[0];
   if (!firstRow) return undefined;
@@ -1966,6 +2064,7 @@ function buildReportCharts(rows: Array<Record<string, unknown>>, plan: ReportPla
     if (chartType === 'line') {
       const data = buildTrendRows(rows, dimension);
       if (data.length === 0) continue;
+      const chartRows = data.map((item) => ({ [dimension]: item.name, [measure]: item.value }));
       charts.push({
         id: normalizeId(chartPlan.id || `${dimension}_trend`),
         title: chartPlan.title || `${dimension}趋势`,
@@ -1973,7 +2072,8 @@ function buildReportCharts(rows: Array<Record<string, unknown>>, plan: ReportPla
         type: 'line',
         dimension,
         measures: [measure],
-        data: data.map((item) => ({ [dimension]: item.name, [measure]: item.value })),
+        data: chartRows,
+        summary: buildReportChartSummary(chartRows, chartRows, dimension, measure),
       });
       continue;
     }
@@ -1981,7 +2081,8 @@ function buildReportCharts(rows: Array<Record<string, unknown>>, plan: ReportPla
     if (chartType === 'stackedBar') {
       const seriesContext = resolveComparisonSeriesContext(rows, tables, userQuery, chartPlan);
       if (seriesContext) {
-        const data = buildStackedDistributionRows(rows, dimension, seriesContext.field, seriesContext.values, limit);
+        const fullData = buildStackedDistributionRows(rows, dimension, seriesContext.field, seriesContext.values, Number.MAX_SAFE_INTEGER);
+        const data = fullData.slice(0, limit);
         if (data.length > 0) {
           charts.push({
             id: normalizeId(chartPlan.id || `comparison_${seriesContext.field}_${dimension}`),
@@ -1991,14 +2092,26 @@ function buildReportCharts(rows: Array<Record<string, unknown>>, plan: ReportPla
             dimension,
             measures: seriesContext.values,
             data,
+            summary: buildReportChartSummary(fullData, data, dimension, '总计'),
           });
           continue;
         }
       }
     }
 
-    const distribution = buildDistributionRows(rows, dimension, limit);
+    const fullDistribution = buildDistributionRows(rows, dimension, Number.MAX_SAFE_INTEGER);
+    const distribution = fullDistribution.slice(0, limit);
     if (distribution.length === 0) continue;
+    const data = distribution.map((item) => ({
+      [dimension]: item.name,
+      [measure]: item.value,
+      占比: item.ratio,
+    }));
+    const fullData = fullDistribution.map((item) => ({
+      [dimension]: item.name,
+      [measure]: item.value,
+      占比: item.ratio,
+    }));
     charts.push({
       id: normalizeId(chartPlan.id || `${dimension}_distribution`),
       title: chartPlan.title || `${dimension}分布`,
@@ -2006,11 +2119,8 @@ function buildReportCharts(rows: Array<Record<string, unknown>>, plan: ReportPla
       type: chartType === 'stackedBar' ? 'bar' : chartType,
       dimension,
       measures: [measure],
-      data: distribution.map((item) => ({
-        [dimension]: item.name,
-        [measure]: item.value,
-        占比: item.ratio,
-      })),
+      data,
+      summary: buildReportChartSummary(fullData, data, dimension, measure),
     });
   }
 
@@ -2386,14 +2496,15 @@ function normalizePythonCharts(value: unknown, chartLimit: number): SmartReportC
     const measures = Array.isArray(raw.measures) ? raw.measures.map(String).filter(Boolean) : ['数量'];
     const chartType = normalizeRenderableChartType(raw.type);
     const dataLimit = chartType === 'line' ? 24 : clampNumber(chartLimit, 3, MAX_REPORT_CHART_LIMIT);
-    const data = Array.isArray(raw.data)
+    const fullData = Array.isArray(raw.data)
       ? raw.data
           .filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object')
-          .slice(0, dataLimit)
           .map((row) => normalizeRecordValues(row))
       : [];
+    const data = fullData.slice(0, dataLimit);
 
     if (!dimension || data.length === 0) return undefined;
+    const summaryMeasure = chartType === 'stackedBar' ? '总计' : measures[0] || '数量';
     return {
       id: normalizeId(String(raw.id || `python_chart_${index + 1}`)),
       title: String(raw.title || `${dimension}分布`),
@@ -2402,6 +2513,7 @@ function normalizePythonCharts(value: unknown, chartLimit: number): SmartReportC
       dimension,
       measures,
       data,
+      summary: buildReportChartSummary(fullData, data, dimension, summaryMeasure),
     };
   }).filter(isDefined).slice(0, 6);
 }
@@ -2538,6 +2650,7 @@ async function writeReportNarrative({
               type: chart.type,
               dimension: chart.dimension,
               measures: chart.measures,
+              summary: chart.summary,
               topData: chart.data.slice(0, 8),
             })),
             rootCauses: artifacts.rootCauses.slice(0, 8),
@@ -2685,8 +2798,11 @@ function buildFallbackChartExplanation(chart: SmartReportChart): SmartReportChar
       ? chart.measures.reduce((sum, item) => sum + Number(first[item] || 0), 0)
       : Number(first[measure] || 0)
     : 0;
+  const summaryText = chart.summary
+    ? `完整查询共 ${chart.summary.totalGroups} 个维度、总量 ${chart.summary.totalValue} 条，当前图表展示 ${chart.summary.displayedGroups} 个维度。`
+    : '';
   const explanation = firstName
-    ? `${chart.title}中，「${firstName}」排名最高，共 ${firstValue} 条，建议优先作为后续拆解和抽样复核对象。`
+    ? `${summaryText}${chart.title}中，「${firstName}」排名最高，共 ${firstValue} 条，建议优先作为后续拆解和抽样复核对象。`
     : `${chart.title}当前没有明显可展示的数据，建议核对筛选条件或补充样本。`;
 
   return {
@@ -3101,7 +3217,66 @@ async function loadConversationContext(sessionId: string): Promise<ConversationC
   };
 }
 
-function buildConversationContextMessages(context: ConversationContext, userQuery: string): DeepSeekMessage[] {
+function buildContextInheritancePolicy(userQuery: string, context: ConversationContext): ContextInheritancePolicy {
+  if (context.recentArtifacts.length === 0) {
+    return {
+      hasContext: false,
+      allowFilterInheritance: false,
+      isFollowUp: false,
+      reason: '当前会话没有可继承的上一轮结构化结果。',
+    };
+  }
+
+  const normalized = normalizeReferenceText(userQuery);
+  const hasArtifactReference = extractReferencedArtifactNumbers(userQuery).length > 0;
+  const explicitInheritance = hasArtifactReference || /刚才|上面|上述|前面|上一轮|这些|其中|这个|该|继续|基于|沿用|继承|同样|相同|只看|展开|拆解|在此基础/.test(userQuery);
+  const vagueFollowUp = /^(那|那么|再|继续|按|换成|改成)/.test(userQuery.trim()) || /呢$/.test(userQuery.trim());
+  const standaloneNewQuestion = /(?:分布|趋势|占比|排行|排名|数量|总量|报告|分析|对比|构成|集中在哪)/.test(userQuery)
+    && !explicitInheritance
+    && !vagueFollowUp;
+
+  if (explicitInheritance || vagueFollowUp) {
+    return {
+      hasContext: true,
+      allowFilterInheritance: true,
+      isFollowUp: true,
+      reason: explicitInheritance
+        ? '用户包含明确承接或沿用表达，允许继承匹配 artifact 的筛选条件。'
+        : '用户是短追问或省略式追问，允许结合最近 artifact 继承筛选条件。',
+    };
+  }
+
+  if (standaloneNewQuestion || normalized.length >= 4) {
+    return {
+      hasContext: true,
+      allowFilterInheritance: false,
+      isFollowUp: false,
+      reason: '用户提出的是完整的新问数需求，没有明确引用上一轮，禁止继承上一轮 WHERE 条件。',
+    };
+  }
+
+  return {
+    hasContext: true,
+    allowFilterInheritance: false,
+    isFollowUp: false,
+    reason: '未检测到明确承接表达，默认不继承上一轮筛选条件。',
+  };
+}
+
+function buildContextPolicyPrompt(policy: ContextInheritancePolicy): string {
+  if (!policy.hasContext) return '';
+  return [
+    '【本轮上下文继承策略】',
+    `isFollowUp=${policy.isFollowUp}`,
+    `inheritFilters=${policy.allowFilterInheritance}`,
+    `原因：${policy.reason}`,
+    policy.allowFilterInheritance
+      ? '允许在 SQL 中继承最近或被引用 artifact 的筛选条件，但仍必须结合用户本轮问题确认。'
+      : '禁止在 SQL 中自动继承上一轮 artifact 的 WHERE 条件；历史 SQL、筛选线索和结果只能作为理解会话的参考，不能被 AND 进本轮查询，除非用户本轮明确写出这些条件。',
+  ].join('\n');
+}
+
+function buildConversationContextMessages(context: ConversationContext, userQuery: string, inheritancePolicy: ContextInheritancePolicy): DeepSeekMessage[] {
   let userQuestionIndex = 0;
   const recentMessages = context.recentMessages.reduce<DeepSeekMessage[]>((messages, message) => {
     if (message.role === 'user') userQuestionIndex += 1;
@@ -3116,14 +3291,17 @@ function buildConversationContextMessages(context: ConversationContext, userQuer
   }, []);
 
   const referenceSummary = resolveArtifactReferenceSummary(userQuery, context.recentArtifacts);
-  const artifactMessage: DeepSeekMessage[] = context.artifactSummary
+  const policySummary = buildContextPolicyPrompt(inheritancePolicy);
+  const artifactSummary = buildStoredArtifactsSummary(context.recentArtifacts, inheritancePolicy.allowFilterInheritance);
+  const artifactMessage: DeepSeekMessage[] = artifactSummary
     ? [{
         role: 'assistant',
         content: [
           '【数据库恢复的结构化问数上下文】',
           '引用规则：当用户说“刚才/上面/其中/这个”时优先使用最近一次 artifact；当用户说“第N张图/图表N”时优先使用报告内图表编号；当用户说“第N个问题/第一次/第N次查询”时优先使用 Artifact N 或用户问题编号；当用户说“TopN里的X/只看X/把异常点展开”时优先在 artifact 的实体候选和Top数据中匹配；当用户说“沿用筛选条件”时继承匹配 artifact 的筛选线索和 SQL WHERE 条件。',
+          policySummary,
           referenceSummary,
-          context.artifactSummary,
+          artifactSummary,
         ].filter(Boolean).join('\n\n'),
       }]
     : [];
@@ -3143,14 +3321,14 @@ function buildStoredHistoryContent(message: StoredChatMessageRow, userQuestionIn
   return parts.join('\n\n');
 }
 
-function buildStoredArtifactsSummary(artifacts: StoredChatArtifactRow[]): string {
+function buildStoredArtifactsSummary(artifacts: StoredChatArtifactRow[], includeFilterContext: boolean = true): string {
   if (artifacts.length === 0) return '';
   return artifacts
-    .map((artifact, index) => buildStoredArtifactSummary(artifact, getArtifactIndex(artifact) || index + 1, index === artifacts.length - 1))
+    .map((artifact, index) => buildStoredArtifactSummary(artifact, getArtifactIndex(artifact) || index + 1, index === artifacts.length - 1, includeFilterContext))
     .join('\n\n---\n\n');
 }
 
-function buildStoredArtifactSummary(artifact: StoredChatArtifactRow, order: number, isLatest: boolean): string {
+function buildStoredArtifactSummary(artifact: StoredChatArtifactRow, order: number, isLatest: boolean, includeFilterContext: boolean): string {
   const metadata = asRecord(artifact.metadata);
   const dimensions = normalizeStoredStringList(artifact.dimensions);
   const measures = normalizeStoredStringList(artifact.measures);
@@ -3163,8 +3341,9 @@ function buildStoredArtifactSummary(artifact: StoredChatArtifactRow, order: numb
     `类型：${artifact.artifact_type}`,
     artifact.title ? `标题：${artifact.title}` : '',
     artifact.summary ? `摘要：${compactText(artifact.summary, 800)}` : '',
-    artifact.sql_text ? `SQL：\n${compactText(artifact.sql_text, 1200)}` : '',
-    filterSummary ? `筛选线索：${filterSummary}` : '',
+    includeFilterContext && artifact.sql_text ? `SQL：\n${compactText(artifact.sql_text, 1200)}` : '',
+    includeFilterContext && filterSummary ? `筛选线索：${filterSummary}` : '',
+    !includeFilterContext ? '注意：本轮判定为独立新问题，此 artifact 的 SQL 和筛选条件已隐藏，禁止自动继承其 WHERE 条件。' : '',
     dimensions.length > 0 ? `维度：${dimensions.join('、')}` : '',
     measures.length > 0 ? `指标：${measures.join('、')}` : '',
     dataSummary,
@@ -3260,7 +3439,8 @@ function resolveArtifactReferenceSummary(userQuery: string, artifacts: StoredCha
   const lines: string[] = [];
   const latestArtifact = artifacts[artifacts.length - 1];
   const chartNumber = extractReferencedChartNumber(userQuery);
-  const artifactNumber = extractReferencedArtifactNumber(userQuery);
+  const artifactNumbers = extractReferencedArtifactNumbers(userQuery);
+  const artifactNumber = artifactNumbers[0];
   const topLimit = extractTopLimit(userQuery);
   const matchedChartPoints = findReferencedChartPoints(userQuery, artifacts);
   const matchedEntities = findReferencedEntities(userQuery, artifacts);
@@ -3268,11 +3448,13 @@ function resolveArtifactReferenceSummary(userQuery: string, artifacts: StoredCha
   const asksFilterInheritance = /沿用|继承|同样|相同|刚才.*筛选|上面.*条件|筛选条件/.test(userQuery);
   const asksAnomaly = /异常|最高|最低|突增|突降|波动|拐点|展开|拆解/.test(userQuery);
 
-  if (artifactNumber) {
-    const targetArtifact = findArtifactByIndex(artifacts, artifactNumber);
-    lines.push(targetArtifact
-      ? `用户引用 Artifact ${artifactNumber}：优先使用该 artifact 的标题、SQL、筛选线索、维度指标和结果样例。`
-      : `用户引用 Artifact ${artifactNumber}，但当前上下文未加载到该 artifact；如无法确认应反问用户。`);
+  if (artifactNumbers.length > 0) {
+    for (const number of artifactNumbers.slice(0, 4)) {
+      const targetArtifact = findArtifactByIndex(artifacts, number);
+      lines.push(targetArtifact
+        ? `用户引用 Artifact ${number}：优先使用该 artifact 的标题、SQL、筛选线索、维度指标和结果样例。`
+        : `用户引用 Artifact ${number}，但当前上下文未加载到该 artifact；如无法确认应反问用户。`);
+    }
   }
 
   if (chartNumber) {
@@ -3511,9 +3693,29 @@ function extractReferencedChartNumber(text: string): number | undefined {
 }
 
 function extractReferencedArtifactNumber(text: string): number | undefined {
-  const match = text.match(/第\s*([一二三四五六七八九十\d]+)\s*(?:个|次|轮)?\s*(?:问题|查询|结果|分析|artifact)/i)
-    || text.match(/第\s*([一二三四五六七八九十\d]+)\s*次/);
-  return parseReferenceNumber(match?.[1]);
+  return extractReferencedArtifactNumbers(text)[0];
+}
+
+function extractReferencedArtifactNumbers(text: string): number[] {
+  const matches: number[] = [];
+  const patterns = [
+    /第\s*([一二三四五六七八九十\d]+(?:\s*(?:和|与|、|,|，)\s*[一二三四五六七八九十\d]+)*)\s*(?:个|次|轮)?\s*(?:问题|查询|结果|分析|artifact)/gi,
+    /第\s*([一二三四五六七八九十\d]+(?:\s*(?:和|与|、|,|，)\s*[一二三四五六七八九十\d]+)*)\s*次/gi,
+    /(?:问题|查询|结果|分析|artifact)\s*#?\s*([一二三四五六七八九十\d]+(?:\s*(?:和|与|、|,|，)\s*[一二三四五六七八九十\d]+)*)/gi,
+  ];
+
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      const raw = match[1] || '';
+      const parts = raw.split(/\s*(?:和|与|、|,|，)\s*/).filter(Boolean);
+      for (const part of parts) {
+        const parsed = parseReferenceNumber(part);
+        if (parsed) matches.push(parsed);
+      }
+    }
+  }
+
+  return Array.from(new Set(matches)).slice(0, 4);
 }
 
 function extractTopLimit(text: string): number | undefined {
@@ -3600,7 +3802,10 @@ function buildStoredReportSummary(report: SmartReport): string {
         })
         .filter(Boolean)
         .join('、');
-      return `图表#${index + 1} ${chart.title}（${chart.type}，维度=${chart.dimension}，指标=${chart.measures.join('/') || measure}${topRows ? `，Top=${topRows}` : ''}）`;
+      const summary = chart.summary
+        ? `，完整总量=${chart.summary.totalValue}，完整维度=${chart.summary.totalGroups}，展示合计=${chart.summary.displayedValue}，展示维度=${chart.summary.displayedGroups}${chart.summary.isTruncated ? `，未展示合计=${chart.summary.hiddenValue}，未展示维度=${chart.summary.hiddenGroups}` : ''}`
+        : '';
+      return `图表#${index + 1} ${chart.title}（${chart.type}，维度=${chart.dimension}，指标=${chart.measures.join('/') || measure}${summary}${topRows ? `，Top=${topRows}` : ''}）`;
     })
     .join('；');
 
@@ -4257,12 +4462,26 @@ function parseSqlPlan(text: string): SqlPlan {
       intent,
       sql: parsed.sql,
       reason: parsed.reason,
+      isFollowUp: typeof parsed.isFollowUp === 'boolean' ? parsed.isFollowUp : undefined,
+      inheritFilters: typeof parsed.inheritFilters === 'boolean' ? parsed.inheritFilters : undefined,
+      inheritReason: typeof parsed.inheritReason === 'string' ? parsed.inheritReason : undefined,
       clarifying_question: parsed.clarifying_question,
       chart_spec: intent === 'chart' ? parsed.chart_spec : undefined,
     };
   } catch {
     throw new Error('模型返回的 SQL 计划无法解析');
   }
+}
+
+function applyContextInheritancePolicyToPlan(plan: SqlPlan, policy: ContextInheritancePolicy): SqlPlan {
+  return {
+    ...plan,
+    isFollowUp: policy.isFollowUp,
+    inheritFilters: policy.allowFilterInheritance && plan.inheritFilters !== false,
+    inheritReason: policy.allowFilterInheritance
+      ? plan.inheritReason || policy.reason
+      : policy.reason,
+  };
 }
 
 function buildSessionTitle(query: string): string {
